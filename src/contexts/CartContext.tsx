@@ -1,0 +1,162 @@
+import { createContext, useContext, ReactNode, useState, useCallback } from 'react';
+import { Product, ProductSize } from '../types/supabase';
+
+interface CartItem {
+  product: Product;
+  size: ProductSize | null;
+  quantity: number;
+  notes: string;
+  discount: number;        // amount discounted per unit (in currency, already calculated)
+  discountType: 'none' | 'percent' | 'fixed';
+  discountValue: number;   // raw input: percentage (e.g. 10 = 10%) or fixed amount
+}
+
+interface CartContextType {
+  items: CartItem[];
+  total: number;
+  paymentMethod: 'cash' | 'card' | 'digital' | null;
+  serviceType: 'store' | 'website' | 'dine_in' | 'takeaway';
+  saleChannel: 'store' | 'website';
+  tableId: string | null;
+  activeOrderId: string | null;
+  customerId: string | null;
+  addItem: (product: Product, size?: ProductSize) => void;
+  updateQuantity: (index: number, delta: number) => void;
+  removeItem: (index: number) => void;
+  setItemNotes: (index: number, notes: string) => void;
+  setItemDiscount: (index: number, type: 'none' | 'percent' | 'fixed', value: number) => void;
+  setPaymentMethod: (method: 'cash' | 'card' | 'digital' | null) => void;
+  setServiceType: (type: 'store' | 'website' | 'dine_in' | 'takeaway') => void;
+  setSaleChannel: (channel: 'store' | 'website') => void;
+  setTableId: (tableId: string | null) => void;
+  setActiveOrderId: (orderId: string | null) => void;
+  setCustomerId: (customerId: string | null) => void;
+  clearCart: () => void;
+}
+
+const CartContext = createContext<CartContextType | undefined>(undefined);
+
+export function getProductEffectivePrice(product: Product): number {
+  if (product.is_promo && product.promo_price && product.promo_price > 0 && product.promo_price < product.base_price) {
+    return Number(product.promo_price);
+  }
+  return Number(product.base_price || 0);
+}
+
+function calcDiscount(basePrice: number, type: 'none' | 'percent' | 'fixed', value: number): number {
+  if (type === 'percent') return Math.min(basePrice, (basePrice * value) / 100);
+  if (type === 'fixed') return Math.min(basePrice, value);
+  return 0;
+}
+
+export function CartProvider({ children }: { children: ReactNode }) {
+  const [items, setItems] = useState<CartItem[]>([]);
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'digital' | null>(null);
+  const [serviceType, setServiceType] = useState<'store' | 'website' | 'dine_in' | 'takeaway'>('store');
+  const [saleChannel, setSaleChannel] = useState<'store' | 'website'>('store');
+  const [tableId, setTableId] = useState<string | null>(null);
+  const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
+  const [customerId, setCustomerId] = useState<string | null>(null);
+
+  const addItem = useCallback((product: Product, size: ProductSize | null = null) => {
+    setItems(currentItems => {
+      const existingIndex = currentItems.findIndex(
+        item => item.product.id === product.id && item.size?.id === size?.id
+      );
+
+      if (existingIndex >= 0) {
+        const newItems = [...currentItems];
+        newItems[existingIndex].quantity += 1;
+        return newItems;
+      }
+
+      return [...currentItems, { product, size, quantity: 1, notes: '', discount: 0, discountType: 'none', discountValue: 0 }];
+    });
+  }, []);
+
+  const updateQuantity = useCallback((index: number, delta: number) => {
+    setItems(currentItems => {
+      const newItems = [...currentItems];
+      newItems[index].quantity += delta;
+      return newItems[index].quantity <= 0
+        ? newItems.filter((_, i) => i !== index)
+        : newItems;
+    });
+  }, []);
+
+  const removeItem = useCallback((index: number) => {
+    setItems(currentItems => currentItems.filter((_, i) => i !== index));
+  }, []);
+
+  const setItemNotes = useCallback((index: number, notes: string) => {
+    setItems(currentItems => {
+      const newItems = [...currentItems];
+      newItems[index].notes = notes;
+      return newItems;
+    });
+  }, []);
+
+  const setItemDiscount = useCallback((index: number, type: 'none' | 'percent' | 'fixed', value: number) => {
+    setItems(currentItems => {
+      const newItems = [...currentItems];
+      const item = newItems[index];
+      const basePrice = getProductEffectivePrice(item.product) + (item.size?.price_modifier || 0);
+      const discountAmount = calcDiscount(basePrice, type, value);
+      newItems[index] = { ...item, discountType: type, discountValue: value, discount: discountAmount };
+      return newItems;
+    });
+  }, []);
+
+  const clearCart = useCallback(() => {
+    setItems([]);
+    setPaymentMethod(null);
+    setTableId(null);
+    setServiceType('store');
+    setSaleChannel('store');
+    setActiveOrderId(null);
+    setCustomerId(null);
+  }, []);
+
+  const total = items.reduce((sum, item) => {
+    const basePrice = getProductEffectivePrice(item.product) + (item.size?.price_modifier || 0);
+    const finalPrice = basePrice - item.discount;
+    return sum + finalPrice * item.quantity;
+  }, 0);
+
+  return (
+    <CartContext.Provider
+      value={{
+        items,
+        total,
+        paymentMethod,
+        serviceType,
+        saleChannel,
+        tableId,
+        activeOrderId,
+        customerId,
+        addItem,
+        updateQuantity,
+        removeItem,
+        setItemNotes,
+        setItemDiscount,
+        setPaymentMethod,
+        setServiceType,
+        setSaleChannel,
+        setTableId,
+        setActiveOrderId,
+        setCustomerId,
+        clearCart,
+      }}
+    >
+      {children}
+    </CartContext.Provider>
+  );
+}
+
+export function useCart() {
+  const context = useContext(CartContext);
+  if (context === undefined) {
+    throw new Error('useCart must be used within a CartProvider');
+  }
+  return context;
+}

@@ -1,0 +1,2778 @@
+import { useState, useEffect, useRef } from 'react';
+import { supabase, formatImageUrl } from '../lib/supabase';
+import { Plus, Edit2, Trash2, Save, X, Package, Search, Eye, Camera, Image as ImageIcon, Sparkles, ScanBarcode } from 'lucide-react';
+import { toast } from 'react-hot-toast';
+import { useLanguage } from '../contexts/LanguageContext';
+import { useCurrency } from '../contexts/CurrencyContext';
+import { useAuth } from '../contexts/AuthContext';
+import { LoadingSpinner } from './LoadingSpinner';
+import IndividualUnitsManager from './IndividualUnitsManager';
+import { BarcodeScanner } from './BarcodeScanner';
+import { ImageGalleryModal } from './ImageGalleryModal';
+import { History } from 'lucide-react';
+import ProductHistoryModal from './ProductHistoryModal';
+
+
+interface Category {
+  id: string;
+  name: string;
+  description: string;
+  deleted_at?: string | null;
+}
+
+interface Product {
+  id: string;
+  category_id: string | null;
+  name: string;
+  description: string;
+  base_price: number;
+  available: boolean;
+  image_url?: string;
+  brand?: string;
+  material?: string;
+  gender?: string;
+  season?: string;
+  stock?: number;
+  barcode?: string;
+  purchase_price?: number;
+  created_at?: string;
+  needs_validation?: boolean;
+  product_sizes?: ProductSize[];
+  deleted_at?: string | null;
+  is_promo?: boolean;
+  promo_price?: number | null;
+}
+
+interface ProductSize {
+  id: string;
+  product_id: string;
+  size_name: string;
+  price_modifier: number;
+  stock: number;
+  barcode?: string;
+}
+
+
+interface ProductImage {
+  id: string;
+  product_id: string;
+  image_url: string;
+  display_order: number;
+}
+
+export function ProductsManager() {
+  const { t } = useLanguage();
+  const { formatCurrency } = useCurrency();
+  const { profile } = useAuth();
+  const isCashier = profile?.role === 'cashier';
+  const isAdmin = profile?.role === 'admin' || profile?.role === 'super_admin';
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [showNewProduct, setShowNewProduct] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [selectedProductForHistory, setSelectedProductForHistory] = useState<Product | null>(null);
+  const [newProduct, setNewProduct] = useState<{
+    name: string;
+    description: string;
+    category_id: string;
+    base_price: number;
+    available: boolean;
+    brand?: string;
+    material?: string;
+    gender?: string;
+    season?: string;
+    stock?: number;
+    barcode?: string;
+    image_url?: string;
+    color?: string;
+    purchase_price?: number;
+    is_promo?: boolean;
+    promo_price?: number;
+  }>({
+    name: '',
+    description: '',
+    category_id: '',
+    base_price: 0,
+    available: true,
+    is_promo: false,
+    promo_price: 0,
+  });
+  const [newProductSizes, setNewProductSizes] = useState<{ name: string; stock: number; price: number; barcode?: string }[]>([]);
+  const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'name-asc' | 'name-desc'>('newest');
+
+
+  // Auxiliar para registrar movimientos de stock
+  const logStockMovement = async (productId: string, quantity: number, type: 'manual_add' | 'manual_deduct' | 'sale' | 'return' | 'correction', sizeId?: string, reason?: string) => {
+    if (quantity === 0 && type !== 'correction') return;
+    try {
+      await supabase.from('stock_movements').insert({
+        product_id: productId,
+        size_id: sizeId,
+        quantity,
+        type,
+        reason: reason || '',
+        employee_id: profile?.id
+      });
+    } catch (err) {
+      console.error('Error logging stock movement:', err);
+    }
+  };
+  const [isEditing, setIsEditing] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingProductOriginal, setEditingProductOriginal] = useState<Product | null>(null);
+
+  const [newProductImage, setNewProductImage] = useState<File | null>(null);
+  const [newProductPreviewUrl, setNewProductPreviewUrl] = useState<string | null>(null);
+  const [editingImage, setEditingImage] = useState<File | null>(null);
+  const [editingImagePreviewUrl, setEditingImagePreviewUrl] = useState<string | null>(null);
+  const [creatingProduct, setCreatingProduct] = useState(false);
+  const [updatingProduct, setUpdatingProduct] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [searchingBarcode, setSearchingBarcode] = useState(false);
+  const [showNotFoundModal, setShowNotFoundModal] = useState(false);
+  const analyzeImageInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const mainCameraInputRef = useRef<HTMLInputElement>(null);
+  const mainGalleryInputRef = useRef<HTMLInputElement>(null);
+  const galleryCameraInputRef = useRef<HTMLInputElement>(null);
+  const galleryFileInputRef = useRef<HTMLInputElement>(null);
+  const [showScanner, setShowScanner] = useState(false);
+  const [showUnitsModal, setShowUnitsModal] = useState(false);
+  const [selectedProductForUnits, setSelectedProductForUnits] = useState<Product | null>(null);
+  const [scanTarget, setScanTarget] = useState<'main' | 'size'>('main');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [selectedSize, setSelectedSize] = useState<string>('all');
+  const [promoFilter, setPromoFilter] = useState<'all' | 'promo' | 'no_promo'>('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [loadingProducts, setLoadingProducts] = useState(false);
+  const ITEMS_PER_PAGE = 20;
+  const [availableSizes, setAvailableSizes] = useState<string[]>([]);
+
+  // Estados para galería de imágenes
+  const [galleryFiles, setGalleryFiles] = useState<File[]>([]);
+  const [galleryPreviews, setGalleryPreviews] = useState<string[]>([]);
+  const [existingGalleryImages, setExistingGalleryImages] = useState<ProductImage[]>([]);
+  const [imagesToDelete, setImagesToDelete] = useState<string[]>([]);
+
+  // Estado para visualización de galería
+  const [galleryModalOpen, setGalleryModalOpen] = useState(false);
+  const [galleryModalProduct, setGalleryModalProduct] = useState<Product | null>(null);
+  const [galleryModalImages, setGalleryModalImages] = useState<{ image_url: string }[]>([]);
+
+  // Helper para redimensionar imágenes (reutilizable)
+  const resizeImage = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_WIDTH = 1200; // Aumentado un poco para mejor calidad en detalles
+          const MAX_HEIGHT = 1200;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.8)); // Calidad 0.8
+        };
+        img.onerror = reject;
+        img.src = event.target?.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+
+  useEffect(() => {
+    fetchCategories();
+    fetchInitialData();
+
+    // Suscripción Realtime para Productos y Tallas
+    const productsChannel = supabase
+      .channel('products-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'products' },
+        (payload) => {
+          console.log('🔄 Cambio en Productos recibido:', payload);
+          fetchProducts(currentPage); // Refresh current page
+        }
+      )
+      .subscribe();
+
+    const sizesChannel = supabase
+      .channel('sizes-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'product_sizes' },
+        (payload) => {
+          console.log('🔄 Cambio en Tallas recibido:', payload);
+          fetchProducts(currentPage);
+          fetchUniqueSizes();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(productsChannel);
+      supabase.removeChannel(sizesChannel);
+    };
+  }, []);
+
+  const fetchInitialData = async () => {
+    await Promise.all([
+      fetchUniqueSizes(),
+      fetchProducts(1)
+    ]);
+  };
+
+  const fetchUniqueSizes = async (categoryId: string = 'all') => {
+    let query = supabase.from('product_sizes').select('size_name, products!inner(category_id)');
+    
+    if (categoryId !== 'all') {
+      query = query.eq('products.category_id', categoryId);
+    }
+    
+    // Solo tallas de productos NO eliminados
+    query = query.is('products.deleted_at', null);
+    
+    const { data, error } = await query;
+    
+    if (!error && data) {
+      const unique = Array.from(new Set(data.map((s: any) => s.size_name))).sort();
+      setAvailableSizes(unique);
+    }
+  };
+
+  // Efecto para filtros y búsqueda (Debounced)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setCurrentPage(1);
+      fetchProducts(1);
+      fetchUniqueSizes(selectedCategory);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [searchTerm, selectedCategory, selectedSize, sortBy, promoFilter]);
+
+  useEffect(() => {
+    if (selectedSize !== 'all' && !availableSizes.includes(selectedSize)) {
+      setSelectedSize('all');
+    }
+  }, [selectedCategory, availableSizes]);
+
+  // Efecto para cambio de página
+  useEffect(() => {
+    fetchProducts(currentPage);
+  }, [currentPage]);
+
+  // Vista previa para nueva imagen de producto
+  useEffect(() => {
+    if (!newProductImage) {
+      if (newProduct.image_url) {
+        setNewProductPreviewUrl(newProduct.image_url);
+      } else {
+        setNewProductPreviewUrl(null);
+      }
+      return;
+    }
+    const url = URL.createObjectURL(newProductImage);
+    setNewProductPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [newProductImage, newProduct.image_url]);
+
+  // Vista previa para imagen en edición
+  useEffect(() => {
+    if (!editingImage) {
+      setEditingImagePreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(editingImage);
+    setEditingImagePreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [editingImage]);
+
+  // Vista previa para galería de imágenes
+  useEffect(() => {
+    if (galleryFiles.length === 0) {
+      setGalleryPreviews([]);
+      return;
+    }
+
+    const newPreviews = galleryFiles.map(file => URL.createObjectURL(file));
+    setGalleryPreviews(newPreviews);
+
+    return () => {
+      newPreviews.forEach(url => URL.revokeObjectURL(url));
+    };
+  }, [galleryFiles]);
+
+  const handleGalleryFilesSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const newFiles = Array.from(e.target.files);
+      setGalleryFiles(prev => [...prev, ...newFiles]);
+    }
+  };
+
+  const handleRemoveNewGalleryImage = (index: number) => {
+    setGalleryFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleRemoveExistingGalleryImage = (id: string) => {
+    setExistingGalleryImages(prev => prev.filter(img => img.id !== id));
+    setImagesToDelete(prev => [...prev, id]);
+  };
+
+  const fetchGalleryImages = async (productId: string) => {
+    const { data, error } = await supabase
+      .from('product_images')
+      .select('*')
+      .eq('product_id', productId)
+      .order('display_order', { ascending: true });
+
+    if (error) {
+      console.error('Error fetching gallery images:', error);
+    } else {
+      setExistingGalleryImages(data || []);
+    }
+  };
+
+  const fetchCategories = async () => {
+    const { data } = await supabase.from('categories').select('*').is('deleted_at', null).order('name');
+    if (data) setCategories(data);
+  };
+
+  const handleViewGallery = async (product: Product) => {
+    setGalleryModalProduct(product);
+    setGalleryModalImages([]);
+    setGalleryModalOpen(true);
+
+    const { data, error } = await supabase
+      .from('product_images')
+      .select('image_url')
+      .eq('product_id', product.id)
+      .order('display_order', { ascending: true });
+
+    if (!error && data) {
+      setGalleryModalImages(data);
+    }
+  };
+
+  const fetchProducts = async (page = currentPage) => {
+    setLoadingProducts(true);
+    try {
+      const from = (page - 1) * ITEMS_PER_PAGE;
+      const to = from + ITEMS_PER_PAGE - 1;
+
+      // Definir la base de la consulta
+      const getBaseQuery = () => {
+        return selectedSize !== 'all' 
+          ? supabase.from('products').select('*, product_sizes!inner(*), product_images(id, image_url, display_order)', { count: 'exact' })
+          : supabase.from('products').select('*, product_sizes(*), product_images(id, image_url, display_order)', { count: 'exact' });
+      };
+
+      let query = getBaseQuery();
+
+      // Aplicar filtros estándar
+      if (selectedCategory !== 'all') query = query.eq('category_id', selectedCategory);
+      if (selectedSize !== 'all') query = query.eq('product_sizes.size_name', selectedSize);
+      if (promoFilter === 'promo') query = query.eq('is_promo', true);
+      if (promoFilter === 'no_promo') query = query.or('is_promo.eq.false,is_promo.is.null');
+
+      let matchedProductIds: string[] = [];
+      if (searchTerm) {
+        // Buscar códigos de barras en las tallas individuales (product_sizes)
+        const { data: sizeMatches } = await supabase
+          .from('product_sizes')
+          .select('product_id')
+          .ilike('barcode', `%${searchTerm}%`);
+          
+        if (sizeMatches && sizeMatches.length > 0) {
+          matchedProductIds = sizeMatches.map((s: any) => s.product_id);
+        }
+      }
+
+      if (searchTerm) {
+        let orConditions = `name.ilike.%${searchTerm}%,barcode.ilike.%${searchTerm}%,brand.ilike.%${searchTerm}%`;
+        if (matchedProductIds.length > 0) {
+          orConditions += `,id.in.(${matchedProductIds.join(',')})`;
+        }
+        query = query.or(orConditions);
+      }
+
+      // Aplicar orden
+      const isAsc = sortBy === 'name-asc' || sortBy === 'oldest';
+      const col = (sortBy === 'name-asc' || sortBy === 'name-desc') ? 'name' : 'created_at';
+      query = query.order(col, { ascending: isAsc });
+
+      // Intento 1: Con filtro de borrado lógico (Estrategia Pro)
+      const { data, count, error } = await query.is('deleted_at', null).range(from, to);
+
+      if (error) {
+        // Si el error es porque la columna aún no existe (antes de ejecutar el SQL)
+        if (error.message.includes('deleted_at')) {
+          console.warn('DB: Columna deleted_at no detectada, usando modo compatibilidad.');
+          const fallbackQuery = getBaseQuery();
+          if (selectedCategory !== 'all') fallbackQuery.eq('category_id', selectedCategory);
+          if (selectedSize !== 'all') fallbackQuery.eq('product_sizes.size_name', selectedSize);
+          if (promoFilter === 'promo') fallbackQuery.eq('is_promo', true);
+          if (promoFilter === 'no_promo') fallbackQuery.or('is_promo.eq.false,is_promo.is.null');
+          
+          if (searchTerm) {
+            let orConditions = `name.ilike.%${searchTerm}%,barcode.ilike.%${searchTerm}%,brand.ilike.%${searchTerm}%`;
+            if (matchedProductIds.length > 0) {
+              orConditions += `,id.in.(${matchedProductIds.join(',')})`;
+            }
+            fallbackQuery.or(orConditions);
+          }
+
+          const { data: fData, count: fCount, error: fError } = await fallbackQuery.order(col, { ascending: isAsc }).range(from, to);
+          if (fError) throw fError;
+
+          // Auto-asignar foto de galería si image_url está vacío
+          if (fData && fData.length > 0) {
+            fData.forEach((p: any) => {
+              if ((!p.image_url || !p.image_url.trim()) && p.product_images && p.product_images.length > 0) {
+                const firstImg = p.product_images[0]?.image_url;
+                if (firstImg) {
+                  p.image_url = firstImg;
+                  supabase.from('products').update({ image_url: firstImg }).eq('id', p.id).then();
+                }
+              }
+            });
+          }
+
+          setProducts(fData || []);
+          setTotalCount(fCount || 0);
+        } else {
+          throw error;
+        }
+      } else {
+        // Auto-asignar foto de galería si image_url está vacío
+        if (data && data.length > 0) {
+          data.forEach((p: any) => {
+            if ((!p.image_url || !p.image_url.trim()) && p.product_images && p.product_images.length > 0) {
+              const firstImg = p.product_images[0]?.image_url;
+              if (firstImg) {
+                p.image_url = firstImg;
+                supabase.from('products').update({ image_url: firstImg }).eq('id', p.id).then();
+              }
+            }
+          });
+        }
+
+        setProducts(data || []);
+        setTotalCount(count || 0);
+      }
+    } catch (error: any) {
+      console.error('Error fetching products:', error);
+      toast.error(t('Error al cargar productos'));
+    } finally {
+      setLoadingProducts(false);
+    }
+  };
+
+  const fetchSizes = async () => {
+    // Ya no lo necesitamos globalmente si los traemos con el producto
+  };
+
+
+  // Función para reparar imágenes rotas usando Google
+  const fixProductImage = async (barcode: string, productName: string, brand: string, currentImageUrl: string) => {
+    // Evitar bucles infinitos si ya intentamos reparar
+    if (currentImageUrl.includes('googleusercontent') || currentImageUrl.includes('gstatic')) {
+      return null;
+    }
+
+    try {
+      console.log(`🔧 Attempting to fix image for: ${productName}`);
+
+      const { data, error } = await supabase.functions.invoke('barcode-lookup', {
+        body: {
+          action: 'fix_image',
+          barcode: barcode,
+          productName: productName,
+          brand: brand
+        }
+      });
+
+      if (error || !data || !data.image_url) {
+        console.error('Failed to fix image:', error);
+        return null;
+      }
+
+      console.log('✅ Image fixed:', data.image_url);
+      return data.image_url;
+    } catch (err) {
+      console.error('Error fixing image:', err);
+      return null;
+    }
+  };
+
+  const handleBarcodeSearch = async () => {
+    const barcode = newProduct.barcode?.trim();
+    if (!barcode) {
+      toast.error(t('Ingresa un código de barras primero'));
+      return;
+    }
+
+    setSearchingBarcode(true);
+    try {
+      // 1. Buscar en PRODUCTOS EXISTENTES primero
+      const { data: existingProduct, error: productError } = await supabase
+        .from('products')
+        .select('*')
+        .eq('barcode', barcode)
+        .maybeSingle();
+
+      if (existingProduct && !productError) {
+        setNewProduct({
+          ...newProduct,
+          name: existingProduct.name || newProduct.name,
+          description: existingProduct.description || newProduct.description,
+          brand: existingProduct.brand || newProduct.brand,
+          image_url: existingProduct.image_url || newProduct.image_url,
+          category_id: existingProduct.category_id || newProduct.category_id,
+          base_price: existingProduct.base_price || newProduct.base_price
+        });
+        toast.success(t('✅ Producto ya existente encontrado en tu inventario'));
+        return;
+      }
+
+      // 2. Buscar en caché local (búsquedas previas de API)
+      const { data: cached, error: cacheError } = await supabase
+        .from('barcode_cache')
+        .select('*')
+        .eq('barcode', barcode)
+        .maybeSingle();
+
+      if (cached && !cacheError) {
+        // Autocompletar desde caché
+        setNewProduct({
+          ...newProduct,
+          name: cached.product_name || newProduct.name,
+          description: cached.description || newProduct.description,
+          brand: cached.brand || newProduct.brand,
+          image_url: cached.image_url || newProduct.image_url,
+        });
+        toast.success(t('scan.info_loaded_cache'), { duration: 3000 });
+        return;
+      }
+
+      // 2. Si no está en caché, consultar API externa
+      toast.loading(t('Buscando información del producto...'), { id: 'barcode-search' });
+
+      const productInfo = await fetchBarcodeFromAPI(barcode);
+
+      if (productInfo) {
+        // 3. Guardar en caché para futuras búsquedas
+        await supabase.from('barcode_cache').insert({
+          barcode: barcode,
+          product_name: productInfo.name,
+          brand: productInfo.brand,
+          description: productInfo.description,
+          category: productInfo.category,
+          image_url: productInfo.image,
+          api_source: productInfo.source || 'edge-function'
+        });
+
+        // 4. Autocompletar formulario
+        setNewProduct({
+          ...newProduct,
+          name: productInfo.name || newProduct.name,
+          description: productInfo.description || newProduct.description,
+          brand: productInfo.brand || newProduct.brand,
+          image_url: productInfo.image || newProduct.image_url,
+        });
+
+        // Si hay imagen, mostrar preview (el usuario puede cambiarla)
+        if (productInfo.image) {
+          toast.success(
+            `${t('scan.found_via')} ${productInfo.source?.toUpperCase() || 'API'}. ${t('scan.image_available')}`,
+            { id: 'barcode-search', duration: 3000 }
+          );
+          // Nota: La imagen se guardará cuando el usuario cree el producto
+          // Por ahora solo mostramos que hay una imagen disponible en el caché
+        } else {
+          toast.success(
+            t('✅ Información del producto cargada. Puedes editarla antes de guardar.'),
+            { id: 'barcode-search' }
+          );
+        }
+      } else {
+        // Fallback: Mostrar Modal de "No encontrado"
+        setSearchingBarcode(false); // Stop spinner
+        setShowNotFoundModal(true);
+      }
+    } catch (error: any) {
+      console.error('Error buscando código de barras:', error);
+      toast.error(
+        t('Error al buscar información del producto. Completa manualmente.'),
+        { id: 'barcode-search' }
+      );
+    } finally {
+      setSearchingBarcode(false);
+    }
+  };
+
+  // Referencias para inputs de imagen
+  // const analyzeImageInputRef = useRef... (moved up)
+
+  const handleImageAnalyze = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Reset input
+    e.target.value = '';
+
+    const toastId = toast.loading(t('Analizando imagen...'));
+
+    try {
+      // 1. Redimensionar y convertir a Base64
+      const base64String = await resizeImage(file);
+
+      // 2. Enviar a Edge Function
+      const { data, error } = await supabase.functions.invoke('barcode-lookup', {
+        body: JSON.stringify({
+          action: 'analyze_image',
+          image: base64String
+        }),
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (error || data?.error) {
+        console.error('AI Analysis Error:', error, data?.error);
+        toast.error(t('No se pudo identificar el producto por imagen'), { id: toastId });
+        return;
+      }
+
+      // 3. Rellenar formulario
+      if (data) {
+        console.log('🤖 Datos Recibidos IA:', data); // Log para depurar
+
+        const googleImage = data.image;
+
+        if (googleImage) {
+          // Estrategia 1: Si hay imagen de Google, usamos ESA como principal.
+          console.log('📸 Usando imagen de Google:', googleImage);
+          setNewProductImage(null);
+          setGalleryFiles([]);
+          setGalleryPreviews([]);
+
+          setNewProductPreviewUrl(googleImage);
+          setNewProduct({
+            ...newProduct,
+            name: data.name || newProduct.name,
+            description: data.description || newProduct.description,
+            brand: data.brand || newProduct.brand,
+            category_id: newProduct.category_id,
+            image_url: googleImage,
+            color: data.color || newProduct.color,
+            material: data.material || newProduct.material,
+            gender: data.gender || newProduct.gender,
+            season: data.season || newProduct.season
+          });
+
+          toast.success(t('scan.product_identified_google'), { id: toastId, duration: 3000 });
+
+        } else {
+          // Estrategia 2: Fallback a foto subida
+          console.log('📸 Usando foto subida (Fallback)');
+          setGalleryFiles([file]);
+          setGalleryPreviews([base64String]);
+          setNewProductImage(file);
+          setNewProductPreviewUrl(base64String);
+
+          setNewProduct({
+            ...newProduct,
+            name: data.name || newProduct.name,
+            description: data.description || newProduct.description,
+            brand: data.brand || newProduct.brand,
+            category_id: newProduct.category_id,
+            color: data.color || newProduct.color,
+            material: data.material || newProduct.material,
+            gender: data.gender || newProduct.gender,
+            season: data.season || newProduct.season
+          });
+
+          toast.success(t('scan.product_identified'), { id: toastId, duration: 3000 });
+        }
+      }
+
+    } catch (error) {
+      console.error('Error analyzing image:', error);
+      toast.error(t('Error al procesar la imagen'), { id: toastId });
+    }
+  };
+
+  const fetchBarcodeFromAPI = async (barcode: string) => {
+    try {
+      console.log('🔍 Buscando vía Supabase Edge Function:', barcode);
+
+      // Llamar a Supabase Edge Function (evita CORS)
+      const { data, error } = await supabase.functions.invoke('barcode-lookup', {
+        body: JSON.stringify({ barcode }),
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+
+      console.log('📡 Respuesta Edge Function:', data, error);
+
+      if (error) {
+        // Ignorar 404 (Producto no encontrado es normal en búsqueda)
+        // @ts-ignore
+        if (error.code === '404' || error.status === 404 || error.message?.includes('FunctionsHttpError')) {
+          console.log('ℹ️ Producto no encontrado en API (404 Normal)');
+        } else {
+          console.warn('⚠️ Error API búsqueda:', error);
+        }
+        return null;
+      }
+
+      if (data?.error) {
+        console.warn('⚠️ API Error:', data.error);
+        return null;
+      }
+
+      console.log('✅ Producto encontrado:', data.name);
+      return {
+        name: data.name,
+        brand: data.brand,
+        description: data.description,
+        category: data.category,
+        image: data.image,
+        source: data.source
+      };
+
+    } catch (error) {
+      console.error('💥 Error:', error);
+      return null;
+    }
+  };
+
+  const handleScanSuccess = (code: string) => {
+    if (scanTarget === 'main') {
+      setNewProduct({ ...newProduct, barcode: code });
+    }
+    setShowScanner(false);
+    toast.success(t('Código escaneado: ') + code);
+  };
+
+  const handleCreateProduct = async () => {
+    if (creatingProduct) return;
+
+    // Validar campos requeridos
+    if (!newProduct.name.trim()) {
+      toast.error(t('products.name_required'));
+      return;
+    }
+
+    if (!newProduct.category_id) {
+      toast.error(t('products.category_required'));
+      return;
+    }
+
+    if (newProduct.base_price <= 0 && !isCashier) {
+      toast.error(t('products.price_invalid'));
+      return;
+    }
+
+    if (newProduct.is_promo) {
+      if (!newProduct.promo_price || newProduct.promo_price <= 0 || newProduct.promo_price >= newProduct.base_price) {
+        toast.error(t('products.invalid_promo_price'));
+        return;
+      }
+    }
+
+    setCreatingProduct(true);
+    try {
+      // Preparar datos para insertar (eliminar campos vacíos opcionales)
+      let finalDescription = newProduct.description?.trim() || '';
+      if (newProduct.color && newProduct.color.trim()) {
+        finalDescription = `[Color: ${newProduct.color.trim()}] ${finalDescription}`;
+      }
+
+      const productData: any = {
+        name: newProduct.name.trim(),
+        description: finalDescription,
+        category_id: newProduct.category_id,
+        base_price: newProduct.base_price,
+        purchase_price: newProduct.purchase_price,
+        available: newProduct.available ?? true,
+        needs_validation: isCashier,
+        created_by: profile?.id,
+        is_promo: isAdmin ? (newProduct.is_promo || false) : false,
+        promo_price: (isAdmin && newProduct.is_promo) ? (newProduct.promo_price || null) : null,
+      };
+
+      // Solo agregar campos opcionales si tienen valor válido
+      console.log('🔍 [PRODUCTS] Validating optional fields:', {
+        brand: newProduct.brand,
+        material: newProduct.material,
+        gender: newProduct.gender,
+        season: newProduct.season,
+        stock: newProduct.stock,
+        barcode: newProduct.barcode
+      });
+
+      if (newProduct.barcode && newProduct.barcode.trim()) {
+        productData.barcode = newProduct.barcode.trim();
+        console.log('✅ Added barcode:', productData.barcode);
+      }
+
+      if (newProduct.brand && newProduct.brand.trim()) {
+        productData.brand = newProduct.brand.trim();
+        console.log('✅ Added brand:', productData.brand);
+      }
+      if (newProduct.material && newProduct.material.trim()) {
+        productData.material = newProduct.material.trim();
+        console.log('✅ Added material:', productData.material);
+      }
+      if (newProduct.gender && newProduct.gender.trim() && newProduct.gender !== '') {
+        productData.gender = newProduct.gender.trim();
+        console.log('✅ Added gender:', productData.gender);
+      }
+      if (newProduct.season && newProduct.season.trim() && newProduct.season !== '') {
+        productData.season = newProduct.season.trim();
+        console.log('✅ Added season:', productData.season);
+      }
+      // Calculate total stock from sizes if any are defined
+      let initialStock = newProduct.stock || 0;
+      if (newProductSizes.length > 0) {
+        initialStock = newProductSizes.reduce((sum, size) => sum + size.stock, 0);
+      }
+
+      if (initialStock > 0) {
+        productData.stock = initialStock;
+        console.log('✅ Added stock (calculated from sizes or input):', productData.stock);
+      }
+
+      // Add image_url if available from barcode search
+      if (newProduct.image_url && newProduct.image_url.trim()) {
+        productData.image_url = newProduct.image_url.trim();
+        console.log('✅ Added image_url:', productData.image_url);
+      }
+
+      console.log('📝 [PRODUCTS] Final product data to insert:', JSON.stringify(productData, null, 2));
+
+      // Create product first
+      let { data: created, error } = await supabase
+        .from('products')
+        .insert(productData)
+        .select('id')
+        .single();
+
+      // Fallback defensivo si la columna created_by o similar aún no existe en Supabase
+      if (error && (error.message?.includes('created_by') || error.message?.includes('needs_validation') || error.message?.includes('purchase_price') || error.message?.includes('is_promo'))) {
+        console.warn('⚠️ [PRODUCTS] Reintentando creación sin columnas opcionales no detectadas:', error.message);
+        const fallbackData = { ...productData };
+        delete fallbackData.created_by;
+        delete fallbackData.needs_validation;
+        delete fallbackData.purchase_price;
+        delete fallbackData.is_promo;
+        delete fallbackData.promo_price;
+        const retry = await supabase
+          .from('products')
+          .insert(fallbackData)
+          .select('id')
+          .single();
+        created = retry.data;
+        error = retry.error;
+      }
+
+      if (created && productData.is_promo) {
+        await logStockMovement(
+          created.id,
+          0,
+          'correction',
+          undefined,
+          `🔥 Promoción activada: Precio Promoción ${productData.promo_price} DH (Precio base: ${productData.base_price} DH)`
+        );
+      }
+
+      if (error) {
+        console.error('❌ [PRODUCTS] Error creating product:', error);
+        if (error.code === '42501') {
+          toast.error(t('products.create_permission_error'));
+        } else if (error.code === '23505' || error.message.includes('duplicate key value')) {
+          toast.error(t('products.barcode_exists'));
+        } else if (error.message.includes('violates check constraint')) {
+          toast.error(t('products.gender_season_error'));
+        } else {
+          toast.error(`${t('Error al crear producto:')} ${error.message}`);
+        }
+        return;
+      }
+
+      console.log('✅ [PRODUCTS] Product created successfully:', created);
+
+      // Insert sizes if any
+      if (created && newProductSizes.length > 0) {
+        const sizesToInsert = newProductSizes.map(size => ({
+          product_id: created.id,
+          size_name: size.name,
+          stock: size.stock,
+          price_modifier: size.price,
+          barcode: size.barcode
+        }));
+
+        const { error: sizesError } = await supabase
+          .from('product_sizes')
+          .insert(sizesToInsert);
+
+        if (sizesError) {
+          console.error('❌ [PRODUCTS] Error creating sizes:', sizesError);
+          toast.error(t('products.sizes_save_error'));
+        } else {
+          console.log('✅ [PRODUCTS] Sizes created successfully');
+          // Registrar movimientos iniciales por talla
+          const { data: newSizes } = await supabase.from('product_sizes').select('id, size_name, stock').eq('product_id', created.id);
+          if (newSizes) {
+            for (const s of newSizes) {
+              if (s.stock > 0) {
+                await logStockMovement(created.id, s.stock, 'manual_add', s.id, t('Stock inicial'));
+              }
+            }
+          }
+        }
+      } else if (created && initialStock > 0) {
+        // Producto simple
+        await logStockMovement(created.id, initialStock, 'manual_add', undefined, t('Stock inicial'));
+      }
+
+      // Upload gallery images
+      if (created && galleryFiles.length > 0) {
+        setUploadingImage(true);
+        try {
+          toast.loading(t('products.uploading_gallery'), { id: 'gallery-upload' });
+          const uploadPromises = galleryFiles.map(async (file, index) => {
+            const fileExt = file.name.split('.').pop();
+            const filePath = `products/${created.id}/gallery_${Date.now()}_${index}.${fileExt}`;
+
+            const { error: uploadError } = await supabase.storage
+              .from('product-images')
+              .upload(filePath, file, {
+                upsert: true,
+                contentType: file.type,
+              });
+
+            if (uploadError) throw uploadError;
+
+            const { data: publicData } = supabase.storage
+              .from('product-images')
+              .getPublicUrl(filePath);
+
+            if (publicData?.publicUrl) {
+              return {
+                product_id: created.id,
+                image_url: publicData.publicUrl,
+                display_order: index
+              };
+            }
+            return null;
+          });
+
+          const results = await Promise.all(uploadPromises);
+          const validImages = results.filter(img => img !== null);
+
+          if (validImages.length > 0) {
+            const { error: insertError } = await supabase.from('product_images').insert(validImages);
+            if (insertError) {
+              console.error('Insert error for gallery:', insertError);
+            } else {
+              toast.success(t('products.gallery_uploaded') || t('Galería subida'), { id: 'gallery-upload' });
+            }
+
+            // Si no se proporcionó una imagen principal explícita, usar la primera de la galería como image_url del producto
+            if (!newProductImage && validImages[0]?.image_url) {
+              await supabase
+                .from('products')
+                .update({ image_url: validImages[0].image_url })
+                .eq('id', created.id);
+            }
+          }
+        } catch (galleryErr) {
+          console.error('Error uploading gallery:', galleryErr);
+          toast.error(t('products.gallery_upload_error'), { id: 'gallery-upload' });
+        } finally {
+          setUploadingImage(false);
+        }
+      }
+
+      // Upload image if provided
+      if (created && newProductImage) {
+        setUploadingImage(true);
+        try {
+          const fileExt = newProductImage.name.split('.').pop();
+          const filePath = `products/${created.id}/${Date.now()}.${fileExt}`;
+
+          toast.loading(t('Subiendo imagen...'), { id: 'image-upload' });
+
+          // Resize before upload
+          const resizedBase64 = await resizeImage(newProductImage);
+          const res = await fetch(resizedBase64);
+          const blob = await res.blob();
+          const resizedFile = new File([blob], newProductImage.name, { type: 'image/jpeg' });
+
+          const { error: uploadError } = await supabase.storage
+            .from('product-images')
+            .upload(filePath, resizedFile, {
+              upsert: true,
+              contentType: 'image/jpeg',
+            });
+
+          if (uploadError) {
+            console.error('❌ [PRODUCTS] Error uploading image:', uploadError);
+
+            if (uploadError.message.includes('Bucket not found')) {
+              toast.error(
+                t('products.bucket_missing'),
+                { id: 'image-upload', duration: 8000 }
+              );
+            } else if (uploadError.message.includes('policy')) {
+              toast.error(
+                t('products.bucket_permissions'),
+                { id: 'image-upload', duration: 6000 }
+              );
+            } else {
+              toast.error(
+                `${t('Error subiendo imagen:')} ${uploadError.message}`,
+                { id: 'image-upload', duration: 6000 }
+              );
+            }
+          } else {
+            const { data: publicData } = supabase.storage
+              .from('product-images')
+              .getPublicUrl(filePath);
+
+            const publicUrl = publicData?.publicUrl;
+            if (publicUrl) {
+              await supabase
+                .from('products')
+                .update({ image_url: publicUrl })
+                .eq('id', created.id);
+
+              toast.success(t('Imagen subida correctamente'), { id: 'image-upload' });
+            } else {
+              toast.error(t('No se pudo obtener la URL pública de la imagen.'), { id: 'image-upload' });
+            }
+          }
+        } catch (uploadErr) {
+          console.error('Error during image upload:', uploadErr);
+          toast.error(t('Error durante la subida de imagen'), { id: 'image-upload' });
+        } finally {
+          setUploadingImage(false);
+        }
+      }
+
+      setShowNewProduct(false);
+      setNewProduct({
+        name: '',
+        description: '',
+        category_id: '',
+        base_price: 0,
+        purchase_price: 0,
+        available: true,
+        barcode: '',
+        is_promo: false,
+        promo_price: 0,
+      });
+      setNewProductSizes([]);
+      setNewProductImage(null);
+      setNewProductPreviewUrl(null);
+      setGalleryFiles([]);
+      setGalleryPreviews([]);
+      setExistingGalleryImages([]);
+      setImagesToDelete([]);
+      fetchProducts();
+      fetchSizes();
+      toast.success(t('Producto creado correctamente'));
+    } catch (err) {
+      console.error('Error creando producto:', err);
+      toast.error(t('Error al crear producto'));
+    } finally {
+      setCreatingProduct(false);
+    }
+
+  };
+
+  const startEditingProduct = (product: Product) => {
+    // 1. Cargar datos básicos
+    setNewProduct({
+      name: product.name,
+      description: product.description,
+      category_id: product.category_id || '',
+      base_price: product.base_price,
+      purchase_price: product.purchase_price || 0,
+      available: product.available,
+      barcode: product.barcode || '',
+      brand: product.brand || '',
+      material: product.material || '',
+      gender: product.gender || '',
+      season: product.season || '',
+      stock: product.stock || 0,
+      image_url: product.image_url,
+      is_promo: product.is_promo || false,
+      promo_price: product.promo_price || 0,
+    });
+
+    // 2. Cargar tallas
+    const productSizesList = (product.product_sizes || []).map(s => ({
+      name: s.size_name,
+      stock: s.stock,
+      price: s.price_modifier || 0,
+      barcode: s.barcode
+    }));
+    setNewProductSizes(productSizesList);
+
+    // 3. Configurar estado de edición
+    setIsEditing(true);
+    setEditingId(product.id);
+    setEditingProductOriginal(product);
+    setShowNewProduct(true);
+    setNewProductPreviewUrl(product.image_url || null);
+
+    // 4. Cargar galería
+    fetchGalleryImages(product.id);
+
+    // 5. Scroll al formulario
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleFullUpdate = async () => {
+    if (!editingId) return;
+
+    if (newProduct.is_promo) {
+      if (!newProduct.promo_price || newProduct.promo_price <= 0 || newProduct.promo_price >= newProduct.base_price) {
+        toast.error(t('products.invalid_promo_price'));
+        return;
+      }
+    }
+
+    setCreatingProduct(true);
+    try {
+      // 1. Prepare product data
+      const productData: any = {
+        name: newProduct.name.trim(),
+        description: newProduct.description?.trim() || '',
+        category_id: newProduct.category_id,
+        base_price: newProduct.base_price,
+        purchase_price: newProduct.purchase_price,
+        available: newProduct.available ?? true,
+        barcode: newProduct.barcode?.trim() || null,
+        brand: newProduct.brand?.trim() || null,
+        material: newProduct.material?.trim() || null,
+        gender: newProduct.gender || null,
+        season: newProduct.season || null,
+        image_url: newProduct.image_url?.trim() || null,
+        needs_validation: isCashier,
+        is_promo: isAdmin ? (newProduct.is_promo || false) : false,
+        promo_price: (isAdmin && newProduct.is_promo) ? (newProduct.promo_price || null) : null,
+      };
+
+      // Handle stock logic
+      let totalStock = newProduct.stock || 0;
+      if (newProductSizes.length > 0) {
+        totalStock = newProductSizes.reduce((sum, s) => sum + s.stock, 0);
+      }
+      productData.stock = totalStock;
+
+      // Find previous product for promo history tracking
+      const prevProd = editingProductOriginal || products.find(p => p.id === editingId);
+
+      // 2. Update Product
+      const { error } = await supabase
+        .from('products')
+        .update(productData)
+        .eq('id', editingId);
+
+      if (error) throw error;
+
+      // Track promo history changes
+      if (prevProd) {
+        const wasPromo = prevProd.is_promo || false;
+        const isPromoNow = productData.is_promo || false;
+        const prevPromoPrice = prevProd.promo_price || 0;
+        const newPromoPrice = productData.promo_price || 0;
+
+        if (!wasPromo && isPromoNow) {
+          await logStockMovement(
+            editingId,
+            0,
+            'correction',
+            undefined,
+            `🔥 Promoción activada: Precio Promoción ${newPromoPrice} DH (Precio base: ${productData.base_price} DH)`
+          );
+        } else if (wasPromo && !isPromoNow) {
+          await logStockMovement(
+            editingId,
+            0,
+            'correction',
+            undefined,
+            `🚫 Promoción desactivada`
+          );
+        } else if (wasPromo && isPromoNow && prevPromoPrice !== newPromoPrice) {
+          await logStockMovement(
+            editingId,
+            0,
+            'correction',
+            undefined,
+            `✏️ Precio Promoción actualizado a ${newPromoPrice} DH (Precio base: ${productData.base_price} DH)`
+          );
+        }
+      }
+
+      // 3. Update Sizes (Delete all and re-insert)
+      // First delete existing
+      const { error: deleteError } = await supabase
+        .from('product_sizes')
+        .delete()
+        .eq('product_id', editingId);
+
+      if (deleteError) throw deleteError;
+
+      // Then insert new ones
+      if (newProductSizes.length > 0) {
+        const sizesToInsert = newProductSizes.map(size => ({
+          product_id: editingId,
+          size_name: size.name,
+          stock: size.stock,
+          price_modifier: size.price,
+          barcode: size.barcode
+        }));
+
+        const { error: sizesError } = await supabase
+          .from('product_sizes')
+          .insert(sizesToInsert);
+
+        if (sizesError) throw sizesError;
+
+        // Registrar movimientos de stock si hubo cambios
+        const oldProduct = products.find(p => p.id === editingId);
+        const oldSizes = oldProduct?.product_sizes || [];
+        
+        // Obtener IDs de las nuevas tallas insertadas
+        const { data: currentSizes } = await supabase.from('product_sizes').select('id, size_name, stock').eq('product_id', editingId);
+        
+        if (currentSizes) {
+          for (const newS of currentSizes) {
+            const oldS = oldSizes.find(os => os.size_name === newS.size_name);
+            const diff = newS.stock - (oldS?.stock || 0);
+            if (diff !== 0) {
+              await logStockMovement(editingId, diff, diff > 0 ? 'manual_add' : 'manual_deduct', newS.id, t('Actualización manual de stock'));
+            }
+          }
+        }
+      } else {
+        // Producto simple
+        const oldProduct = products.find(p => p.id === editingId);
+        const diff = totalStock - (oldProduct?.stock || 0);
+        if (diff !== 0) {
+          await logStockMovement(editingId, diff, diff > 0 ? 'manual_add' : 'manual_deduct', undefined, t('Actualización manual de stock'));
+        }
+      }
+
+      // 4. Handle Deletions of Gallery Images
+      if (imagesToDelete.length > 0) {
+        const { error: deleteError } = await supabase
+          .from('product_images')
+          .delete()
+          .in('id', imagesToDelete);
+
+        if (deleteError) {
+          console.error('Error deleting gallery images:', deleteError);
+          toast.error(t('products.gallery_delete_error'));
+        }
+      }
+
+      // 5. Handle New Gallery Images Upload
+      if (galleryFiles.length > 0) {
+        setUploadingImage(true);
+        try {
+          toast.loading(t('products.gallery_uploading'), { id: 'gallery-update' });
+          const currentCount = existingGalleryImages.length;
+
+          const uploadPromises = galleryFiles.map(async (file, index) => {
+            const fileExt = file.name.split('.').pop();
+            const filePath = `products/${editingId}/gallery_${Date.now()}_${index}.${fileExt}`;
+
+            const { error: uploadError } = await supabase.storage
+              .from('product-images')
+              .upload(filePath, file, {
+                upsert: true,
+                contentType: file.type,
+              });
+
+            if (uploadError) throw uploadError;
+
+            const { data: publicData } = supabase.storage
+              .from('product-images')
+              .getPublicUrl(filePath);
+
+            if (publicData?.publicUrl) {
+              return {
+                product_id: editingId,
+                image_url: publicData.publicUrl,
+                display_order: currentCount + index
+              };
+            }
+            return null;
+          });
+
+          const results = await Promise.all(uploadPromises);
+          const validImages = results.filter(img => img !== null);
+
+          if (validImages.length > 0) {
+            const { error: insertError } = await supabase.from('product_images').insert(validImages);
+            if (insertError) {
+              console.error('Insert error for gallery edit:', insertError);
+            } else {
+              toast.success(t('products.gallery_updated'), { id: 'gallery-update' });
+            }
+
+            // Si el producto no tiene imagen principal asignada, asignar la primera imagen subida
+            if (!newProductImage && (!editingProduct?.image_url || editingProduct.image_url.trim() === '') && validImages[0]?.image_url) {
+              await supabase
+                .from('products')
+                .update({ image_url: validImages[0].image_url })
+                .eq('id', editingId);
+            }
+          }
+        } catch (galleryErr) {
+          console.error('Error uploading gallery:', galleryErr);
+          toast.error(t('products.gallery_upload_error'), { id: 'gallery-update' });
+        } finally {
+          setUploadingImage(false);
+        }
+      }
+
+      // 6. Handle Main Image Upload
+      if (newProductImage) {
+        setUploadingImage(true);
+        const fileExt = newProductImage.name.split('.').pop();
+        const filePath = `products/${editingId}/${Date.now()}.${fileExt}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from('product-images')
+          .upload(filePath, newProductImage, { upsert: true });
+
+        if (!uploadError) {
+          const { data: publicData } = supabase.storage
+            .from('product-images')
+            .getPublicUrl(filePath);
+
+          if (publicData?.publicUrl) {
+            await supabase
+              .from('products')
+              .update({ image_url: publicData.publicUrl })
+              .eq('id', editingId);
+          }
+        }
+      }
+
+      toast.success(t('Producto actualizado correctamente'));
+
+      // Cleanup
+      setIsEditing(false);
+      setEditingId(null);
+      setGalleryFiles([]);
+      setGalleryPreviews([]);
+      setExistingGalleryImages([]);
+      setImagesToDelete([]);
+      fetchProducts();
+      fetchSizes();
+
+    } catch (err: any) {
+      console.error('Error updating product:', err);
+      toast.error(t('Error al actualizar producto: ') + err.message);
+    } finally {
+      setCreatingProduct(false);
+      setUploadingImage(false);
+    }
+  };
+
+  const resetForm = () => {
+    setNewProduct({
+      name: '',
+      description: '',
+      category_id: '',
+      base_price: 0,
+      purchase_price: 0,
+      available: true,
+      barcode: '',
+      stock: 0,
+      brand: '',
+      material: '',
+      gender: '',
+      season: ''
+    });
+    setNewProductSizes([]);
+    setNewProductImage(null);
+    setNewProductPreviewUrl(null);
+    setIsEditing(false);
+    setEditingId(null);
+    setGalleryFiles([]);
+    setGalleryPreviews([]);
+    setExistingGalleryImages([]);
+    setImagesToDelete([]);
+  };
+
+  const handleUpdateProduct = async () => {
+    if (!editingProduct || updatingProduct) return;
+
+    setUpdatingProduct(true);
+    try {
+      // Update product first
+      const { error } = await supabase
+        .from('products')
+        .update({
+          name: editingProduct.name,
+          description: editingProduct.description,
+          category_id: editingProduct.category_id,
+          base_price: editingProduct.base_price,
+          purchase_price: editingProduct.purchase_price,
+          available: editingProduct.available,
+          barcode: editingProduct.barcode,
+          image_url: editingProduct.image_url,
+          needs_validation: isCashier,
+        })
+        .eq('id', editingProduct.id);
+
+      if (error) {
+        toast.error(t('Error al actualizar producto'));
+        return;
+      }
+
+      // Upload new image if provided
+      if (editingImage && editingProduct) {
+        setUploadingImage(true);
+        try {
+          const fileExt = editingImage.name.split('.').pop();
+          const filePath = `products/${editingProduct.id}/${Date.now()}.${fileExt}`;
+
+          toast.loading(t('Subiendo imagen...'), { id: 'image-edit-upload' });
+
+          // Resize before upload
+          const resizedBase64 = await resizeImage(editingImage);
+          const res = await fetch(resizedBase64);
+          const blob = await res.blob();
+          const resizedFile = new File([blob], editingImage.name, { type: 'image/jpeg' });
+
+          const { error: uploadError } = await supabase.storage
+            .from('product-images')
+            .upload(filePath, resizedFile, {
+              upsert: true,
+              contentType: 'image/jpeg',
+            });
+
+          if (uploadError) {
+            console.error('Error subiendo imagen:', uploadError);
+            toast.error(`${t('Error subiendo imagen:')} ${uploadError.message || ''}`, { id: 'image-edit-upload' });
+          } else {
+            const { data: publicData } = supabase.storage
+              .from('product-images')
+              .getPublicUrl(filePath);
+
+            if (publicData?.publicUrl) {
+              await supabase
+                .from('products')
+                .update({ image_url: publicData.publicUrl })
+                .eq('id', editingProduct.id);
+
+              toast.success(t('Imagen subida correctamente'), { id: 'image-edit-upload' });
+            } else {
+              toast.error(t('No se pudo obtener la URL pública de la imagen.'), { id: 'image-edit-upload' });
+            }
+          }
+        } catch (uploadErr) {
+          console.error('Error during image upload:', uploadErr);
+          toast.error(t('Error durante la subida de imagen'), { id: 'image-edit-upload' });
+        } finally {
+          setUploadingImage(false);
+        }
+      }
+
+      setEditingImage(null);
+      setEditingImagePreviewUrl(null);
+      setEditingProduct(null);
+      fetchProducts();
+      toast.success(t('Producto actualizado correctamente'));
+    } catch (err) {
+      console.error('Error actualizando producto:', err);
+      toast.error(t('Error al actualizar producto'));
+    } finally {
+      setUpdatingProduct(false);
+    }
+  };
+
+  const handleDeleteProduct = async (id: string) => {
+    const productToDelete = products.find(p => p.id === id);
+    if (!productToDelete) return;
+
+    if (!confirm(`${t('¿Estás seguro de que deseas eliminar este producto?')}\n\n${t('El producto será eliminado permanentemente de la lista de productos activos. Los pedidos históricos que contengan este producto se mantendrán intactos.')}`)) return;
+
+    try {
+      // Check if product is used in any orders (for informational purposes)
+      console.log('Checking product usage for ID:', id);
+      const { data: orderItems, error: checkError } = await supabase
+        .from('order_items')
+        .select('id, orders!inner(status)')
+        .eq('product_id', id)
+        .limit(1);
+
+      if (checkError) {
+        console.error('Error checking product usage:', checkError);
+        toast.error(t('Error al verificar el uso del producto'));
+        return;
+      }
+
+      console.log('Order items found:', orderItems);
+      if (orderItems && orderItems.length > 0) {
+        console.log('Product is used in orders, but will proceed with soft delete');
+      }
+
+      console.log('Proceeding with soft delete');
+
+      // Check if product appears in order history (for informational purposes only)
+      const { data: historyItems, error: historyError } = await supabase
+        .from('order_history')
+        .select('id, items')
+        .limit(1000); // Get a reasonable number of recent history records
+
+      if (historyError) {
+        console.error('Error checking order history:', historyError);
+        // Don't block deletion for history check errors
+      }
+
+      let productInHistory = false;
+      if (historyItems) {
+        productInHistory = historyItems.some(record => {
+          try {
+            const items = Array.isArray(record.items) ? record.items : [];
+            return items.some((item: any) => item.product_id === id);
+          } catch (err) {
+            console.error('Error parsing order history items:', err);
+            return false;
+          }
+        });
+      }
+
+      if (productInHistory) {
+        console.log('Product found in order history, but proceeding with soft delete');
+        toast(t('El producto aparece en el historial de pedidos, pero se eliminará correctamente.'), {
+          icon: '⚠️',
+          duration: 4000
+        });
+      }
+
+      // Proceed with soft deletion
+      const { error: deleteError } = await supabase
+        .from('products')
+        .update({ 
+          deleted_at: new Date().toISOString(),
+          available: false,
+          // Append timestamp to barcode to avoid unique constraint conflicts
+          barcode: productToDelete.barcode ? `${productToDelete.barcode}-deleted-${Date.now()}` : null
+        })
+        .eq('id', id);
+
+      if (deleteError) {
+        console.error('Error deleting product:', deleteError);
+        toast.error(`${t('Error al eliminar producto:')} ${deleteError.message}`);
+        return;
+      }
+
+      toast.success(t('Producto eliminado correctamente. El historial de pedidos se mantiene intacto.'));
+      fetchProducts();
+    } catch (err) {
+      console.error('Error in delete operation:', err);
+      toast.error(t('Error al eliminar producto'));
+    }
+  };
+
+  const getCategoryName = (categoryId: string | null) => {
+    return categories.find(c => c.id === categoryId)?.name || t('Sin categoría');
+  };
+
+  const getProductSizes = (product: Product) => {
+    return product.product_sizes || [];
+  };
+
+  const getProductDisplayImageUrl = (product: Product): string | null => {
+    if (product.image_url && product.image_url.trim()) {
+      return formatImageUrl(product.image_url);
+    }
+    const gallery = (product as any).product_images;
+    if (Array.isArray(gallery) && gallery.length > 0) {
+      const sorted = [...gallery].sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0));
+      const firstValid = sorted.find(img => img.image_url && img.image_url.trim());
+      if (firstValid?.image_url) {
+        return formatImageUrl(firstValid.image_url);
+      }
+    }
+    return null;
+  };
+
+  const Pagination = () => {
+    const totalPages = Math.ceil(totalCount / ITEMS_PER_PAGE);
+    if (totalPages <= 1) return null;
+
+    return (
+      <div className="p-4 border-t border-gray-100 flex flex-col sm:flex-row items-center justify-between bg-gray-50/50 gap-4">
+        <div className="text-sm text-gray-500">
+          {t('common.showing')} <span className="font-medium">{(currentPage - 1) * ITEMS_PER_PAGE + 1}</span> - <span className="font-medium">{Math.min(currentPage * ITEMS_PER_PAGE, totalCount)}</span> {t('common.of')} <span className="font-medium">{totalCount}</span> {t('common.products')}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+            disabled={currentPage === 1}
+            className="px-3 py-1.5 border border-gray-300 rounded-lg bg-white text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors text-sm font-medium"
+          >
+            {t('common.previous')}
+          </button>
+          <div className="flex items-center gap-2 px-3">
+            <span className="text-xs text-gray-500 uppercase tracking-wider">{t('common.page')}</span>
+            <span className="font-bold text-sm text-amber-600">{currentPage}</span>
+            <span className="text-xs text-gray-400">/</span>
+            <span className="font-medium text-sm text-gray-600">{totalPages}</span>
+          </div>
+          <button
+            onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+            disabled={currentPage === totalPages || totalPages === 0}
+            className="px-3 py-1.5 border border-gray-300 rounded-lg bg-white text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors text-sm font-medium"
+          >
+            {t('common.next')}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // filteredProducts ya no es necesario porque filtramos en el servidor
+  const displayProducts = products;
+
+  return (
+    <>
+      <div className="p-6">
+      <div className="flex justify-between items-center mb-6">
+        <h2 className="text-2xl font-bold text-gray-900">{t('Gestión de Productos')}</h2>
+        <button
+          onClick={() => {
+            if (showNewProduct && isEditing) {
+              // Cancelar edición
+              resetForm();
+              setShowNewProduct(false);
+            } else {
+              setShowNewProduct(!showNewProduct);
+              if (!showNewProduct) resetForm();
+            }
+          }}
+          className={`bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${showNewProduct && isEditing ? 'bg-red-600 hover:bg-red-700' : ''
+            }`}
+        >
+          {showNewProduct && isEditing ? (
+            <>
+              <X className="w-5 h-5" />
+              {t('Cancelar Edición')}
+            </>
+          ) : (
+            <>
+              <Plus className="w-5 h-5" />
+              {t('Nuevo Producto')}
+            </>
+          )}
+        </button>
+      </div>
+
+      {showNewProduct && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 z-50 animate-fadeIn">
+          <div className="bg-white w-full h-[96vh] sm:h-auto sm:max-h-[90vh] sm:max-w-2xl rounded-t-3xl sm:rounded-2xl flex flex-col shadow-2xl overflow-hidden border border-gray-100">
+            {/* Header Sticky */}
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-white z-20 sticky top-0 flex-shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-amber-500/10 text-amber-600 flex items-center justify-center font-bold">
+                  {isEditing ? <Edit2 className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
+                </div>
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-gray-900 leading-tight">
+                    {isEditing ? t('Editar Producto') : t('Nuevo Producto')}
+                  </h3>
+                  <p className="text-[11px] text-gray-500 hidden sm:block">
+                    {t('Completa la información para guardarlo en el inventario')}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowNewProduct(false)}
+                className="p-2 rounded-xl text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Scrollable Form Body */}
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 pb-28 sm:pb-6">
+              {/* Bloque Imagen Principal */}
+              <div className="bg-gray-50/80 p-3.5 sm:p-4 rounded-2xl border border-gray-200/80">
+                <label className="block text-xs font-bold text-gray-600 uppercase tracking-wider mb-2.5">
+                  {t('Imagen Principal')}
+                </label>
+                <div className="flex flex-col sm:flex-row items-center sm:items-start gap-4">
+                  <div className="relative flex-shrink-0">
+                    {(newProductPreviewUrl || newProduct.image_url) ? (
+                      <div className="relative">
+                        <img
+                          src={newProductPreviewUrl || newProduct.image_url}
+                          alt={t('Vista previa')}
+                          className="h-28 w-28 object-cover rounded-2xl border-2 border-amber-500/30 shadow-sm"
+                          onError={(e) => {
+                            const img = e.currentTarget;
+                            if (img.parentElement) {
+                              img.style.display = 'none';
+                              const fallback = document.createElement('div');
+                              fallback.className = "h-28 w-28 flex items-center justify-center bg-gray-100 text-gray-400 rounded-2xl border text-xs text-center p-2";
+                              fallback.innerText = t("Error imagen");
+                              img.parentElement.appendChild(fallback);
+                            }
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNewProductImage(null);
+                            setNewProduct({ ...newProduct, image_url: '' });
+                          }}
+                          className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1.5 hover:bg-red-600 shadow-md z-10 transition-transform active:scale-90"
+                          title={t('Quitar imagen')}
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="h-28 w-28 bg-white rounded-2xl border-2 border-dashed border-gray-300 flex flex-col items-center justify-center text-gray-400 shadow-2xs">
+                        <Package className="w-8 h-8 opacity-40 mb-1" />
+                        <span className="text-[10px] text-gray-400 font-medium">{t('Sin imagen')}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex-1 w-full space-y-2">
+                    <p className="text-xs text-gray-600">
+                      {t('Foto principal visible en catálogo, POS y ventas.')}
+                    </p>
+
+                    {/* Botones de acción móvil: Cámara y Galería */}
+                    <div className="grid grid-cols-2 gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => mainCameraInputRef.current?.click()}
+                        disabled={uploadingImage}
+                        className="py-2.5 px-3 bg-amber-500/10 hover:bg-amber-500/20 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors active:scale-95"
+                      >
+                        <Camera className="w-4 h-4 text-amber-600" />
+                        <span>{t('Hacer Foto')}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => mainGalleryInputRef.current?.click()}
+                        disabled={uploadingImage}
+                        className="py-2.5 px-3 bg-white hover:bg-gray-100 text-gray-700 border border-gray-300 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors active:scale-95 shadow-2xs"
+                      >
+                        <ImageIcon className="w-4 h-4 text-gray-600" />
+                        <span>{t('Galería')}</span>
+                      </button>
+                    </div>
+
+                    {uploadingImage && (
+                      <div className="text-amber-700 text-xs font-medium flex items-center gap-1.5 animate-pulse pt-1">
+                        <LoadingSpinner size="sm" />
+                        <span>{t('Subiendo imagen...')}</span>
+                      </div>
+                    )}
+
+                    {/* Hidden inputs for camera & gallery */}
+                    <input
+                      type="file"
+                      ref={mainCameraInputRef}
+                      accept="image/*"
+                      capture="environment"
+                      onChange={e => setNewProductImage(e.target.files?.[0] || null)}
+                      className="hidden"
+                    />
+                    <input
+                      type="file"
+                      ref={mainGalleryInputRef}
+                      accept="image/*"
+                      onChange={e => setNewProductImage(e.target.files?.[0] || null)}
+                      className="hidden"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Bloque Galería de Imágenes Adicionales */}
+              <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-gray-200">
+                <div className="flex items-center justify-between mb-2.5">
+                  <label className="block text-xs font-bold text-gray-600 uppercase tracking-wider">
+                    {t('products.gallery')}
+                  </label>
+                  <span className="text-[11px] text-gray-400">
+                    {existingGalleryImages.length + galleryPreviews.length} {t('fotos')}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5 mb-2">
+                  {/* Imágenes Existentes (en edición) */}
+                  {existingGalleryImages.map((img) => (
+                    <div key={img.id} className="relative aspect-square bg-gray-100 rounded-xl overflow-hidden border border-gray-200 shadow-2xs">
+                      <img src={img.image_url} alt="Gallery" className="w-full h-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveExistingGalleryImage(img.id)}
+                        className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-1 hover:bg-red-600 shadow-sm transition-colors"
+                        title={t('products.gallery_delete')}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+
+                  {/* Nuevas Imágenes (Previews) */}
+                  {galleryPreviews.map((url, idx) => (
+                    <div key={`new-${idx}`} className="relative aspect-square bg-gray-100 rounded-xl overflow-hidden border border-gray-200 shadow-2xs">
+                      <img src={url} alt={`New Gallery ${idx}`} className="w-full h-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveNewGalleryImage(idx)}
+                        className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-1 hover:bg-red-600 shadow-sm transition-colors"
+                        title={t('products.gallery_remove_new')}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+
+                  {/* Botón Añadir a Galería */}
+                  <div className="aspect-square bg-amber-50/50 hover:bg-amber-100/50 rounded-xl border-2 border-dashed border-amber-300/80 flex flex-col items-center justify-center p-2 text-center transition-colors">
+                    <div className="flex gap-1.5 mb-1">
+                      <button
+                        type="button"
+                        onClick={() => galleryCameraInputRef.current?.click()}
+                        className="p-1.5 bg-amber-500 text-white rounded-lg hover:bg-amber-600 shadow-xs active:scale-95 transition-transform"
+                        title={t('Hacer foto para galería')}
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => galleryFileInputRef.current?.click()}
+                        className="p-1.5 bg-white text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-100 shadow-xs active:scale-95 transition-transform"
+                        title={t('Elegir de galería')}
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <span className="text-[10px] text-amber-800 font-semibold leading-tight">{t('Añadir')}</span>
+                  </div>
+
+                  <input
+                    type="file"
+                    ref={galleryCameraInputRef}
+                    accept="image/*"
+                    capture="environment"
+                    onChange={handleGalleryFilesSelect}
+                    className="hidden"
+                  />
+                  <input
+                    type="file"
+                    ref={galleryFileInputRef}
+                    multiple
+                    accept="image/*"
+                    onChange={handleGalleryFilesSelect}
+                    className="hidden"
+                  />
+                </div>
+              </div>
+
+              {/* Nombre del Producto */}
+              <div>
+                <label className="block text-xs font-bold text-gray-600 uppercase tracking-wider mb-1.5">
+                  {t('Nombre del Producto')} <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={newProduct.name}
+                  onChange={e => setNewProduct({ ...newProduct, name: e.target.value })}
+                  placeholder="Ej: Camisa Slim Fit Lino"
+                  className="w-full px-3.5 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-amber-500 text-base sm:text-sm font-medium shadow-2xs"
+                />
+              </div>
+
+              {/* Categoría */}
+              <div>
+                <label className="block text-xs font-bold text-gray-600 uppercase tracking-wider mb-1.5">
+                  {t('Categoría')}
+                </label>
+                <select
+                  value={newProduct.category_id}
+                  onChange={e => setNewProduct({ ...newProduct, category_id: e.target.value })}
+                  className="w-full px-3.5 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-amber-500 text-base sm:text-sm bg-white shadow-2xs"
+                >
+                  <option value="">{t('Seleccionar categoría')}</option>
+                  {categories.map(cat => (
+                    <option key={cat.id} value={cat.id}>{cat.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Precios (Costo y Venta) */}
+              <div className={`grid ${!isCashier ? 'grid-cols-2' : 'grid-cols-1'} gap-3 sm:gap-4`}>
+                {!isCashier && (
+                  <div>
+                    <label className="block text-xs font-bold text-gray-600 uppercase tracking-wider mb-1.5">
+                      {t('Costo (Compra)')}
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={newProduct.purchase_price || 0}
+                      onChange={e => setNewProduct({ ...newProduct, purchase_price: parseFloat(e.target.value) })}
+                      className="w-full px-3.5 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-amber-500 text-base sm:text-sm shadow-2xs font-semibold"
+                    />
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 uppercase tracking-wider mb-1.5">
+                    {t('Precio (Venta)')} <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    disabled={isCashier}
+                    value={newProduct.base_price}
+                    onChange={e => setNewProduct({ ...newProduct, base_price: parseFloat(e.target.value) })}
+                    className="w-full px-3.5 py-2.5 border border-amber-300 bg-amber-50/30 rounded-xl focus:ring-2 focus:ring-amber-500 disabled:bg-gray-100 disabled:cursor-not-allowed text-base sm:text-sm shadow-2xs font-extrabold text-amber-950"
+                  />
+                </div>
+              </div>
+
+              {/* Sección Promoción (Admin) */}
+              {isAdmin && (
+                <div className="bg-amber-50/60 p-3 sm:p-4 rounded-xl border border-amber-200">
+                  <div className="flex items-center gap-2 mb-2">
+                    <input
+                      type="checkbox"
+                      id="is_promo"
+                      checked={newProduct.is_promo || false}
+                      onChange={e => setNewProduct({ ...newProduct, is_promo: e.target.checked })}
+                      className="w-4 h-4 text-amber-600 rounded focus:ring-amber-500 cursor-pointer"
+                    />
+                    <label htmlFor="is_promo" className="text-xs font-extrabold text-amber-950 flex items-center gap-1 cursor-pointer">
+                      🔥 {t('products.promo_active')}
+                    </label>
+                  </div>
+                  {newProduct.is_promo && (
+                    <div className="pt-1">
+                      <label className="block text-xs font-bold text-amber-900 mb-1">
+                        {t('products.promo_price')}
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={newProduct.promo_price || ''}
+                        onChange={e => setNewProduct({ ...newProduct, promo_price: parseFloat(e.target.value) || 0 })}
+                        placeholder="Ej: 19.99"
+                        className="w-full px-3.5 py-2 border border-amber-300 bg-white rounded-xl focus:ring-2 focus:ring-amber-500 font-extrabold text-amber-900 text-base sm:text-sm"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Atributos: Marca, Color, Material, Género, Temporada */}
+              <div className="pt-2 border-t border-gray-100">
+                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2.5">
+                  {t('Detalles y Atributos')}
+                </label>
+                <div className="grid grid-cols-2 gap-3 sm:gap-4">
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">{t('Marca')}</label>
+                    <input
+                      type="text"
+                      value={newProduct.brand || ''}
+                      onChange={e => setNewProduct({ ...newProduct, brand: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-amber-500 text-base sm:text-sm"
+                      placeholder="Nike, Zara..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">{t('Color')}</label>
+                    <input
+                      type="text"
+                      value={newProduct.color || ''}
+                      onChange={e => setNewProduct({ ...newProduct, color: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-amber-500 text-base sm:text-sm"
+                      placeholder="Negro, Azul..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">{t('Material')}</label>
+                    <input
+                      type="text"
+                      value={newProduct.material || ''}
+                      onChange={e => setNewProduct({ ...newProduct, material: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-amber-500 text-base sm:text-sm"
+                      placeholder="Algodón, Lino..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">{t('Género')}</label>
+                    <select
+                      value={newProduct.gender || ''}
+                      onChange={e => setNewProduct({ ...newProduct, gender: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-amber-500 text-base sm:text-sm bg-white"
+                    >
+                      <option value="">{t('Seleccionar...')}</option>
+                      <option value="hombre">{t('Hombre')}</option>
+                      <option value="mujer">{t('Mujer')}</option>
+                      <option value="unisex">{t('Unisex')}</option>
+                      <option value="niño">{t('Niño')}</option>
+                      <option value="niña">{t('Niña')}</option>
+                    </select>
+                  </div>
+                  <div className="col-span-2 sm:col-span-1">
+                    <label className="block text-xs text-gray-600 mb-1">{t('Temporada')}</label>
+                    <select
+                      value={newProduct.season || ''}
+                      onChange={e => setNewProduct({ ...newProduct, season: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-amber-500 text-base sm:text-sm bg-white"
+                    >
+                      <option value="">{t('Seleccionar...')}</option>
+                      <option value="verano">{t('Verano')}</option>
+                      <option value="invierno">{t('Invierno')}</option>
+                      <option value="primavera">{t('Primavera')}</option>
+                      <option value="otoño">{t('Otoño')}</option>
+                      <option value="todas">{t('Todo el año')}</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Descripción */}
+              <div>
+                <label className="block text-xs font-bold text-gray-600 uppercase tracking-wider mb-1.5">
+                  {t('Descripción')}
+                </label>
+                <textarea
+                  value={newProduct.description}
+                  onChange={e => setNewProduct({ ...newProduct, description: e.target.value })}
+                  className="w-full px-3.5 py-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-amber-500 text-base sm:text-sm shadow-2xs"
+                  rows={2}
+                  placeholder={t('Detalles adicionales sobre el producto...')}
+                />
+              </div>
+            </div>
+
+            {/* Sticky Action Footer (Siempre visible en el móvil) */}
+            <div className="p-3.5 sm:px-6 sm:py-4 bg-white/95 backdrop-blur-xs border-t border-gray-200/80 flex items-center gap-2.5 sticky bottom-0 z-20 shadow-[0_-4px_12px_rgba(0,0,0,0.06)]">
+              <button
+                type="button"
+                onClick={() => setShowNewProduct(false)}
+                disabled={creatingProduct || uploadingImage}
+                className="px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-xl text-sm transition-colors flex-shrink-0 active:scale-95"
+              >
+                {t('Cancelar')}
+              </button>
+              <button
+                type="button"
+                onClick={isEditing ? handleFullUpdate : handleCreateProduct}
+                disabled={creatingProduct || uploadingImage || !newProduct.name.trim()}
+                className="flex-1 py-3 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-bold rounded-xl text-sm shadow-md hover:shadow-lg disabled:opacity-50 transition-all flex items-center justify-center gap-2 active:scale-[0.98]"
+              >
+                {creatingProduct || uploadingImage ? (
+                  <>
+                    <LoadingSpinner size="sm" light />
+                    <span>{uploadingImage ? t('Subiendo imagen...') : (isEditing ? t('Actualizando...') : t('Creando...'))}</span>
+                  </>
+                ) : (
+                  <span>{isEditing ? t('Actualizar Producto') : t('Crear Producto')}</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showScanner && (
+        <BarcodeScanner
+          onScanSuccess={handleScanSuccess}
+          onClose={() => setShowScanner(false)}
+        />
+      )}
+
+      <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-gray-100 flex flex-col sm:flex-row gap-4 bg-gray-50/50">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
+            <input
+              type="text"
+              placeholder={t('Buscar productos...')}
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-transparent bg-white shadow-sm"
+            />
+          </div>
+          <select
+            value={selectedCategory}
+            onChange={(e) => setSelectedCategory(e.target.value)}
+            className="px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-amber-500 bg-white shadow-sm text-sm text-gray-700 outline-none min-w-[140px]"
+          >
+            <option value="all">{t('Todas las categorías')}</option>
+            {categories.map(cat => (
+              <option key={cat.id} value={cat.id}>{cat.name}</option>
+            ))}
+          </select>
+          <select
+            value={selectedSize}
+            onChange={(e) => setSelectedSize(e.target.value)}
+            className="px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-amber-500 bg-white shadow-sm text-sm text-gray-700 outline-none min-w-[120px]"
+          >
+            <option value="all">{t('Todas las tallas')}</option>
+            {availableSizes.map(size => (
+              <option key={size} value={size}>{size}</option>
+            ))}
+          </select>
+          <select
+            value={promoFilter}
+            onChange={(e) => setPromoFilter(e.target.value as any)}
+            className="px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-amber-500 bg-white shadow-sm text-sm text-gray-700 outline-none min-w-[140px]"
+          >
+            <option value="all">{t('Todos los productos')}</option>
+            <option value="promo">🔥 {t('Solo Promociones')}</option>
+            <option value="no_promo">{t('Sin Promoción')}</option>
+          </select>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as any)}
+            className="px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-amber-500 bg-white shadow-sm text-sm text-gray-700 outline-none"
+          >
+            <option value="newest">{t('Más recientes')}</option>
+            <option value="oldest">{t('Más antiguos')}</option>
+            <option value="name-asc">{t('Nombre (A-Z)')}</option>
+            <option value="name-desc">{t('Nombre (Z-A)')}</option>
+          </select>
+        </div>
+          {loadingProducts && <LoadingSpinner size="sm" />}
+        {/* Vista Móvil (Tarjetas) */}
+        <div className="grid grid-cols-1 gap-4 p-4 md:hidden">
+          {displayProducts.map(product => (
+            <div key={product.id} className="bg-white rounded-lg border border-gray-200 shadow-sm p-4 flex gap-4">
+              {/* Imagen */}
+              <div
+                className="w-20 h-20 flex-shrink-0 bg-gray-100 rounded-lg overflow-hidden cursor-pointer hover:opacity-90 transition-opacity"
+                onClick={() => handleViewGallery(product)}
+                title={t('products.gallery_view')}
+              >
+                {(() => {
+                  const imgUrl = getProductDisplayImageUrl(product);
+                  return imgUrl ? (
+                    <img
+                      src={imgUrl}
+                      alt={product.name}
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        e.currentTarget.style.display = 'none';
+                        e.currentTarget.parentElement?.classList.add('flex', 'items-center', 'justify-center');
+                        e.currentTarget.parentElement!.innerHTML = '<svg class="w-8 h-8 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>';
+                      }}
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-gray-400">
+                      <Package className="w-8 h-8 opacity-50" />
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Info y Acciones */}
+              <div className="flex-1 min-w-0 flex flex-col justify-between">
+                <div>
+                  <h3 className="font-bold text-gray-900 truncate">{product.name}</h3>
+                  <div className="flex items-center gap-2 mt-1">
+                    {product.is_promo && product.promo_price && product.promo_price > 0 && product.promo_price < product.base_price ? (
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-lg font-black text-emerald-600">{formatCurrency(product.promo_price)}</span>
+                        <span className="text-xs line-through text-gray-400 font-medium">{formatCurrency(product.base_price)}</span>
+                        <span className="text-[10px] font-extrabold bg-red-500 text-white px-1.5 py-0.5 rounded-full uppercase tracking-wider">
+                          🔥 PROMO
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-lg font-bold text-amber-600">{formatCurrency(product.base_price)}</span>
+                    )}
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${(getProductSizes(product).length > 0
+                      ? getProductSizes(product).reduce((sum, s) => sum + s.stock, 0)
+                      : (product.stock || 0)) > 0
+                      ? 'bg-green-100 text-green-800'
+                      : 'bg-red-100 text-red-800'
+                      }`}>
+                      Stock: {getProductSizes(product).length > 0
+                        ? getProductSizes(product).reduce((sum, s) => sum + s.stock, 0)
+                        : (product.stock || 0)
+                      }
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1 truncate">{product.brand || t('Sin marca')}</p>
+                </div>
+
+                <div className="flex justify-end gap-3 mt-2">
+                  <button
+                    onClick={() => handleViewGallery(product)}
+                    className="p-2 bg-emerald-50 text-emerald-600 rounded-lg hover:bg-emerald-100 transition-colors"
+                    title={t('products.gallery_view')}
+                  >
+                    <Eye className="w-5 h-5" />
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSelectedProductForUnits(product);
+                      setShowUnitsModal(true);
+                    }}
+                    className="p-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors"
+                  >
+                    <Package className="w-5 h-5" />
+                  </button>
+                  {isAdmin && (
+                    <button
+                      onClick={() => {
+                        setSelectedProductForHistory(product);
+                        setShowHistoryModal(true);
+                      }}
+                      className="p-2 bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-100 transition-colors"
+                      title={t('Ver Historial del Producto')}
+                    >
+                      <History className="w-5 h-5" />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => startEditingProduct(product)}
+                    className="p-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors"
+                  >
+                    <Edit2 className="w-5 h-5" />
+                  </button>
+                  {!isCashier && (
+                    <button
+                      onClick={() => handleDeleteProduct(product.id)}
+                      className="p-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <Pagination />
+
+        {/* Vista Desktop (Tabla) */}
+        <table className="w-full hidden md:table">
+          <thead className="bg-gray-50 border-b border-gray-200">
+            <tr>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('Imagen')}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('Producto')}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('Categoría')}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('Marca')}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('Género')}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('Precio')}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('Stock')}</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('Estado')}</th>
+              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">{t('Acciones')}</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-200">
+            {displayProducts.map(product => (
+              <tr key={product.id} className="hover:bg-gray-50">
+                <td className="px-6 py-4">
+                  {/* Image Column */}
+                  {editingProduct?.id === product.id ? (
+                    <div className="flex items-center gap-3">
+                      {(editingImagePreviewUrl || product.image_url) && (
+                        <div className="relative">
+                          <img
+                            src={editingImagePreviewUrl || product.image_url || ''}
+                            alt={t('Vista previa')}
+                            className="h-32 w-32 object-cover rounded border"
+                            onError={async (e) => {
+                              const img = e.currentTarget;
+                              if (img.parentElement) {
+                                const loading = document.createElement('div');
+                                loading.className = "absolute inset-0 bg-gray-100 flex items-center justify-center text-xs text-amber-600 animate-pulse";
+                                loading.innerText = "Reparando...";
+                                img.style.display = 'none';
+                                img.parentElement.appendChild(loading);
+                              }
+                              const newUrl = await fixProductImage(
+                                product.barcode || '',
+                                product.name,
+                                product.brand || '',
+                                product.image_url || ''
+                              );
+                              if (newUrl) {
+                                const updatedProducts = products.map(p =>
+                                  p.id === product.id ? { ...p, image_url: newUrl } : p
+                                );
+                                setProducts(updatedProducts);
+                                await supabase.from('products').update({ image_url: newUrl }).eq('id', product.id);
+                              } else if (img.parentElement) {
+                                img.parentElement.innerHTML = '';
+                                const fallback = document.createElement('div');
+                                fallback.className = "h-16 w-16 flex items-center justify-center bg-gray-100 text-gray-400 rounded border text-xs text-center p-1";
+                                fallback.innerText = "Sin Imagen";
+                                img.parentElement.appendChild(fallback);
+                              }
+                            }}
+                          />
+                          {uploadingImage && (
+                            <div className="absolute inset-0 bg-black bg-opacity-50 rounded flex items-center justify-center">
+                              <LoadingSpinner size="sm" light />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      <div className="relative">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          disabled={uploadingImage}
+                          onChange={e => {
+                            const file = e.target.files?.[0] || null;
+                            setEditingImage(file);
+                          }}
+                          className={`text-xs w-32 ${uploadingImage ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      className="h-32 w-32 bg-gray-100 rounded-lg overflow-hidden border border-gray-200 cursor-pointer hover:opacity-90 transition-opacity"
+                      onClick={() => handleViewGallery(product)}
+                      title={t('products.gallery_view')}
+                    >
+                      {(() => {
+                        const imgUrl = getProductDisplayImageUrl(product);
+                        return imgUrl ? (
+                          <img
+                            src={imgUrl}
+                            alt={product.name}
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none';
+                              e.currentTarget.parentElement?.classList.add('flex', 'items-center', 'justify-center');
+                              e.currentTarget.parentElement!.innerHTML = '<svg class="w-6 h-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /></svg>';
+                            }}
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-gray-400">
+                            <Package className="w-6 h-6 opacity-50" />
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </td>
+                <td className="px-6 py-4">
+                  {/* Product Name Column (Cleaned) */}
+                  <div className="flex flex-col">
+                    {editingProduct?.id === product.id ? (
+                      <div>
+                        {/* Edit mode inputs */}
+                        <input
+                          type="text"
+                          value={editingProduct.name}
+                          onChange={e => setEditingProduct({ ...editingProduct, name: e.target.value })}
+                          className="w-full px-2 py-1 border border-gray-300 rounded"
+                          placeholder={t('Nombre')}
+                        />
+                        <input
+                          type="text"
+                          value={editingProduct.barcode || ''}
+                          onChange={e => setEditingProduct({ ...editingProduct, barcode: e.target.value })}
+                          className="w-full px-2 py-1 border border-gray-300 rounded font-mono text-xs mt-1"
+                          placeholder="Código de Barras"
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <div className="font-medium text-gray-900">{product.name}</div>
+                        <div className="text-sm text-gray-500 line-clamp-2">{product.description}</div>
+                        {getProductSizes(product).length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {getProductSizes(product).map(s => (
+                              <span key={s.id} className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                {s.size_name} ({s.stock})
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-900">
+                  {editingProduct?.id === product.id ? (
+                    <select
+                      value={editingProduct.category_id || ''}
+                      onChange={e => setEditingProduct({ ...editingProduct, category_id: e.target.value })}
+                      className="w-full px-2 py-1 border border-gray-300 rounded"
+                    >
+                      {categories.map(cat => (
+                        <option key={cat.id} value={cat.id}>{cat.name}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    getCategoryName(product.category_id)
+                  )}
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-900">
+                  {editingProduct?.id === product.id ? (
+                    <input
+                      type="text"
+                      value={editingProduct.brand || ''}
+                      onChange={e => setEditingProduct({ ...editingProduct, brand: e.target.value })}
+                      className="w-28 px-2 py-1 border border-gray-300 rounded"
+                      placeholder={t('Marca')}
+                    />
+                  ) : (
+                    product.brand || '-'
+                  )}
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-900">
+                  {editingProduct?.id === product.id ? (
+                    <select
+                      value={editingProduct.gender || ''}
+                      onChange={e => setEditingProduct({ ...editingProduct, gender: e.target.value })}
+                      className="w-28 px-2 py-1 border border-gray-300 rounded"
+                    >
+                      <option value="">{t('Seleccionar')}</option>
+                      <option value="hombre">{t('gender.hombre')}</option>
+                      <option value="mujer">{t('gender.mujer')}</option>
+                      <option value="unisex">{t('gender.unisex')}</option>
+                      <option value="niño">{t('gender.niño')}</option>
+                      <option value="niña">{t('gender.niña')}</option>
+                    </select>
+                  ) : (
+                    product.gender ? t(`gender.${product.gender}`) : '-'
+                  )}
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-900">
+                  {editingProduct?.id === product.id ? (
+                    <input
+                      type="number"
+                      step="0.01"
+                      disabled={isCashier}
+                      value={editingProduct.base_price}
+                      onChange={e => setEditingProduct({ ...editingProduct, base_price: parseFloat(e.target.value) })}
+                      className="w-20 px-2 py-1 border border-gray-300 rounded disabled:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-75"
+                      title={isCashier ? t('No tienes permisos para editar el precio') : ''}
+                    />
+                  ) : (
+                    product.is_promo && product.promo_price && product.promo_price > 0 && product.promo_price < product.base_price ? (
+                      <div className="flex flex-col">
+                        <span className="font-black text-emerald-600">{formatCurrency(product.promo_price)}</span>
+                        <span className="text-xs line-through text-gray-400 font-medium">{formatCurrency(product.base_price)}</span>
+                        <span className="inline-block mt-0.5 text-[9px] font-black bg-red-500 text-white px-1.5 py-0.5 rounded-full uppercase tracking-wider w-fit">
+                          🔥 PROMO
+                        </span>
+                      </div>
+                    ) : (
+                      formatCurrency(product.base_price)
+                    )
+                  )}
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-600">
+                  {editingProduct?.id === product.id ? (
+                    <input
+                      type="number"
+                      disabled={isCashier}
+                      value={editingProduct.stock || 0}
+                      onChange={e => setEditingProduct({ ...editingProduct, stock: parseInt(e.target.value) || 0 })}
+                      className="w-20 px-2 py-1 border border-gray-300 rounded disabled:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-75"
+                      title={isCashier ? t('No tienes permisos para establecer stock') : ''}
+                    />
+                  ) : (
+                    <span className={`font-medium ${(getProductSizes(product).length > 0
+                      ? getProductSizes(product).reduce((sum, s) => sum + s.stock, 0)
+                      : (product.stock || 0)) < 5 ? 'text-red-600' : 'text-gray-900'
+                      }`}>
+                      {getProductSizes(product).length > 0
+                        ? getProductSizes(product).reduce((sum, s) => sum + s.stock, 0)
+                        : (product.stock || 0)
+                      }
+                    </span>
+                  )}
+                </td>
+                <td className="px-6 py-4">
+                  <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${(getProductSizes(product).length > 0
+                    ? getProductSizes(product).reduce((sum, s) => sum + s.stock, 0)
+                    : (product.stock || 0)) > 0
+                    ? 'bg-green-100 text-green-800'
+                    : 'bg-red-100 text-red-800'
+                    }`}>
+                    {(getProductSizes(product).length > 0
+                      ? getProductSizes(product).reduce((sum, s) => sum + s.stock, 0)
+                      : (product.stock || 0)) > 0 ? t('Disponible') : t('Agotado')}
+                  </span>
+                </td>
+                <td className="px-6 py-4 text-right">
+                  {editingProduct?.id === product.id ? (
+                    <div className="flex justify-end gap-2">
+                      <button
+                        onClick={handleUpdateProduct}
+                        disabled={updatingProduct || uploadingImage}
+                        className={`flex items-center gap-1 ${updatingProduct || uploadingImage ? 'text-green-400 cursor-not-allowed' : 'text-green-600 hover:text-green-800'}`}
+                        title={updatingProduct || uploadingImage ? (uploadingImage ? t('Subiendo imagen...') : t('Guardando cambios...')) : t('Guardar cambios')}
+                      >
+                        {updatingProduct || uploadingImage ? (
+                          <LoadingSpinner size="sm" />
+                        ) : (
+                          <Save className="w-5 h-5" />
+                        )}
+                      </button>
+                      <button
+                        onClick={() => setEditingProduct(null)}
+                        disabled={updatingProduct || uploadingImage}
+                        className={`flex items-center gap-1 ${updatingProduct || uploadingImage ? 'text-gray-400 cursor-not-allowed' : 'text-gray-600 hover:text-gray-800'}`}
+                        title={updatingProduct || uploadingImage ? t('Espera a que termine la operación') : t('Cancelar edición')}
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex justify-end gap-2">
+                      <button
+                        onClick={() => handleViewGallery(product)}
+                        className="text-emerald-600 hover:text-emerald-800"
+                        title={t('products.gallery_view')}
+                      >
+                        <Eye className="w-5 h-5" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          setSelectedProductForUnits(product);
+                          setShowUnitsModal(true);
+                        }}
+                        className="text-purple-600 hover:text-purple-800"
+                        title={t('Gestionar unidades individuales')}
+                      >
+                        <Package className="w-5 h-5" />
+                      </button>
+                      {isAdmin && (
+                        <button
+                          onClick={() => {
+                            setSelectedProductForHistory(product);
+                            setShowHistoryModal(true);
+                          }}
+                          className="text-amber-600 hover:text-amber-800"
+                          title={t('Ver Historial del Producto')}
+                        >
+                          <History className="w-5 h-5" />
+                        </button>
+                      )}
+                      <button
+                        onClick={() => startEditingProduct(product)}
+                        className="text-blue-600 hover:text-blue-800"
+                        title={t('Editar producto')}
+                      >
+                        <Edit2 className="w-5 h-5" />
+                      </button>
+                      {!isCashier && (
+                        <button
+                          onClick={() => handleDeleteProduct(product.id)}
+                          className="text-red-600 hover:text-red-800"
+                          title={t('Eliminar producto permanentemente')}
+                        >
+                          <Trash2 className="w-5 h-5" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <Pagination />
+      </div>
+
+      {/* Modal for Individual Units Management */}
+      {showUnitsModal && selectedProductForUnits && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">
+                  {t('Unidades Individuales')}
+                </h3>
+                <p className="text-sm text-gray-600 mt-1">
+                  {selectedProductForUnits.name}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowUnitsModal(false);
+                  setSelectedProductForUnits(null);
+                }}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto p-6">
+              <IndividualUnitsManager
+                productId={selectedProductForUnits.id}
+                productName={selectedProductForUnits.name}
+                totalStock={selectedProductForUnits.stock || 0}
+                product={selectedProductForUnits as any}
+              />
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-gray-200 flex justify-end">
+              <button
+                onClick={() => {
+                  setShowUnitsModal(false);
+                  setSelectedProductForUnits(null);
+                  fetchProducts(); // Refresh products list
+                }}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+              >
+                {t('Cerrar')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showNotFoundModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-[60]">
+          <div className="bg-white rounded-xl p-6 max-w-sm w-full shadow-2xl transform transition-all scale-100">
+            <div className="text-center mb-6">
+              <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-amber-100 mb-4">
+                <svg className="h-6 w-6 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <h3 className="text-lg leading-6 font-bold text-gray-900 mb-2">
+                Produit non trouvé
+              </h3>
+              <p className="text-sm text-gray-500">
+                Nous n&apos;avons trouvé aucune information pour ce code. Voulez-vous identifier le produit avec une photo ?
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <button
+                onClick={() => {
+                  setShowNotFoundModal(false);
+                  cameraInputRef.current?.click();
+                }}
+                className="w-full flex justify-center items-center px-4 py-3 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 shadow-sm"
+              >
+                <svg className="mr-2 -ml-1 h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Prendre une photo
+              </button>
+
+              <button
+                onClick={() => {
+                  setShowNotFoundModal(false);
+                  analyzeImageInputRef.current?.click();
+                }}
+                className="w-full flex justify-center items-center px-4 py-3 border border-gray-300 text-sm font-medium rounded-lg text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 shadow-sm"
+              >
+                <svg className="mr-2 -ml-1 h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                Charger une photo
+              </button>
+
+              <button
+                onClick={() => setShowNotFoundModal(false)}
+                className="w-full mt-2 flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium text-gray-500 hover:text-gray-700"
+              >
+                Annuler
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <input
+        type="file"
+        ref={analyzeImageInputRef}
+        className="hidden"
+        accept="image/*"
+        onChange={handleImageAnalyze}
+      />
+      <input
+        type="file"
+        ref={cameraInputRef}
+        className="hidden"
+        accept="image/*"
+        capture="environment" // Fuerza cámara trasera
+        onChange={handleImageAnalyze}
+      />
+
+      {galleryModalOpen && galleryModalProduct && (
+        <ImageGalleryModal
+          product={galleryModalProduct as any}
+          productSizes={(galleryModalProduct.product_sizes || []) as any}
+          galleryImages={galleryModalImages}
+          onClose={() => setGalleryModalOpen(false)}
+        />
+      )}
+      
+      {showHistoryModal && selectedProductForHistory && (
+        <ProductHistoryModal
+          productId={selectedProductForHistory.id}
+          productName={selectedProductForHistory.name}
+          currentStock={getProductSizes(selectedProductForHistory).length > 0
+            ? getProductSizes(selectedProductForHistory).reduce((sum, s) => sum + s.stock, 0)
+            : (selectedProductForHistory.stock || 0)
+          }
+          onClose={() => {
+            setShowHistoryModal(false);
+            setSelectedProductForHistory(null);
+          }}
+        />
+      )}
+      </div>
+    </>
+  );
+}

@@ -1,0 +1,393 @@
+import { useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
+import { Building2, MapPin, Phone, Save, AlertCircle, Instagram } from 'lucide-react';
+import { toast } from 'react-hot-toast';
+import { useLanguage } from '../contexts/LanguageContext';
+import { LoadingSpinner, LoadingPage } from './LoadingSpinner';
+
+interface CompanySettings {
+  id: string;
+  company_name: string;
+  address: string;
+  phone: string;
+  instagram_link?: string;
+  language?: 'es' | 'fr';
+}
+
+export function CompanySettings() {
+  const { t } = useLanguage();
+  const [settings, setSettings] = useState<CompanySettings>({
+    id: '',
+    company_name: '',
+    address: '',
+    phone: '',
+  });
+  const [originalSettings, setOriginalSettings] = useState<CompanySettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [hasChanges, setHasChanges] = useState(false);
+
+  useEffect(() => {
+    fetchSettings();
+    ensureSuperAdminPermissions();
+  }, []);
+
+  useEffect(() => {
+    if (originalSettings) {
+      const changed = JSON.stringify(settings) !== JSON.stringify(originalSettings);
+      setHasChanges(changed);
+    }
+  }, [settings, originalSettings]);
+
+  const fetchSettings = async () => {
+    setLoading(true);
+    try {
+      console.log('🔍 COMPANY SETTINGS: Fetching current settings...');
+      const { data, error } = await supabase
+        .from('company_settings')
+        .select('*')
+        .single();
+
+      if (error) {
+        if (error.code === 'PGRST116') {
+          // No data found, create default settings
+          console.log('⚠️ COMPANY SETTINGS: No company settings found, creating defaults...');
+          await createDefaultSettings();
+        } else {
+          console.error('❌ COMPANY SETTINGS: Error fetching settings:', error);
+          throw error;
+        }
+      } else if (data) {
+        console.log('✅ COMPANY SETTINGS: Settings loaded successfully:', data);
+        setSettings(data);
+        setOriginalSettings(data);
+      } else {
+        console.log('⚠️ COMPANY SETTINGS: No data returned from query');
+      }
+    } catch (error) {
+      console.error('💥 COMPANY SETTINGS: Error fetching company settings:', error);
+      toast.error(t('Error al cargar configuración de la empresa'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const createDefaultSettings = async () => {
+    try {
+      console.log('🏗️ COMPANY SETTINGS: Creating default settings...');
+      const defaultData = {
+        company_name: 'Linventory',
+        address: 'Calle Principal #123, Ciudad',
+        phone: '+34 000 000 000'
+      };
+      console.log('📋 COMPANY SETTINGS: Default data to insert:', defaultData);
+
+      const { data, error } = await supabase
+        .from('company_settings')
+        .insert(defaultData)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('❌ COMPANY SETTINGS: Error creating default settings:', error);
+        throw error;
+      }
+
+      if (data) {
+        console.log('✅ COMPANY SETTINGS: Default settings created successfully:', data);
+        setSettings(data);
+        setOriginalSettings(data);
+        toast.success(t('Configuración por defecto creada'));
+      } else {
+        console.log('⚠️ COMPANY SETTINGS: No data returned after creating default settings');
+      }
+    } catch (error) {
+      console.error('💥 COMPANY SETTINGS: Error creating default settings:', error);
+      toast.error(t('Error al crear configuración por defecto'));
+    }
+  };
+
+  const ensureSuperAdminPermissions = async () => {
+    try {
+      // Ensure super_admin has access to critical system pages
+      const permissionsToEnsure = [
+        { role: 'super_admin', section: 'Sistema', page_id: 'company-settings', can_access: true },
+        { role: 'super_admin', section: 'Sistema', page_id: 'role-management', can_access: true }
+      ];
+
+      for (const perm of permissionsToEnsure) {
+        const { error } = await supabase
+          .from('role_permissions')
+          .upsert(perm, {
+            onConflict: 'role,section,page_id'
+          });
+
+        if (error) {
+          console.error('Error ensuring super_admin permissions:', error);
+        }
+      }
+
+      console.log('Super admin permissions verified');
+    } catch (error) {
+      console.error('Error ensuring permissions:', error);
+    }
+  };
+
+
+
+  const handleSave = async () => {
+    if (!settings.company_name.trim()) {
+      toast.error(t('company.name_required'));
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const settingsData = {
+        company_name: settings.company_name.trim(),
+        address: settings.address ? settings.address.trim() : null,
+        phone: settings.phone ? settings.phone.trim() : null,
+        instagram_link: settings.instagram_link ? settings.instagram_link.trim() : null,
+      };
+
+      console.log('💾 COMPANY SETTINGS: Saving company settings:', settingsData);
+      console.log('📝 COMPANY SETTINGS: Current settings state:', settings);
+
+      // First, check if a record already exists
+      console.log('🔍 COMPANY SETTINGS: Checking for existing record...');
+      const { data: existingRecord, error: checkError } = await supabase
+        .from('company_settings')
+        .select('*')
+        .single();
+
+      if (checkError && checkError.code !== 'PGRST116') {
+        console.error('❌ COMPANY SETTINGS: Error checking existing record:', checkError);
+      } else {
+        console.log('📋 COMPANY SETTINGS: Existing record found:', existingRecord);
+      }
+
+      let result;
+
+      if (existingRecord) {
+        // Update existing record
+        console.log('🔄 COMPANY SETTINGS: Updating existing record with ID:', existingRecord.id);
+        result = await supabase
+          .from('company_settings')
+          .update(settingsData)
+          .eq('id', existingRecord.id)
+          .select()
+          .single();
+      } else {
+        // Create new record
+        console.log('➕ COMPANY SETTINGS: Creating new company settings record');
+        result = await supabase
+          .from('company_settings')
+          .insert(settingsData)
+          .select()
+          .single();
+      }
+
+      if (result.error) {
+        console.error('❌ COMPANY SETTINGS: Database error:', result.error);
+        throw result.error;
+      }
+
+      console.log('✅ COMPANY SETTINGS: Save result:', result.data);
+
+      // Verify the data was actually saved
+      console.log('🔍 COMPANY SETTINGS: Verifying save by re-fetching...');
+      const { data: verifyData, error: verifyError } = await supabase
+        .from('company_settings')
+        .select('*')
+        .single();
+
+      if (verifyError) {
+        console.error('❌ COMPANY SETTINGS: Error verifying save:', verifyError);
+      } else {
+        console.log('✅ COMPANY SETTINGS: Verification - data in database:', verifyData);
+      }
+
+      // Update the settings with the saved data
+      if (result.data) {
+        setSettings(result.data);
+        setOriginalSettings(result.data);
+        setHasChanges(false);
+
+        // Dispatch custom event to notify other components
+        console.log('📡 COMPANY SETTINGS: Dispatching companySettingsUpdated event with data:', result.data);
+        window.dispatchEvent(new CustomEvent('companySettingsUpdated', {
+          detail: result.data
+        }));
+
+        toast.success(t('Configuración guardada correctamente'));
+      }
+    } catch (error: any) {
+      console.error('Error saving company settings:', error);
+      toast.error(`${t('Error al guardar la configuración:')} ${error.message || error}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleReset = () => {
+    if (originalSettings) {
+      setSettings({ ...originalSettings });
+      setHasChanges(false);
+    }
+  };
+
+  if (loading) {
+    return <LoadingPage message={t('Cargando configuración...')} />;
+  }
+
+  return (
+    <div className="p-4 md:p-6 bg-gray-50 min-h-screen">
+      {/* Header */}
+      <div className="mb-6">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center">
+              <Building2 className="w-6 h-6 text-blue-600" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-gray-900">{t('Información de la Empresa')}</h2>
+              <p className="text-sm text-gray-600">{t('Configure los datos que aparecen en tickets y reportes')}</p>
+            </div>
+          </div>
+
+          {hasChanges && (
+            <div className="flex gap-2">
+              <button
+                onClick={handleReset}
+                className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors"
+              >
+                {t('Deshacer')}
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
+              >
+                {saving ? (
+                  <>
+                    <LoadingSpinner size="sm" light />
+                    {t('Guardando...')}
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-4 h-4" />
+                    {t('Guardar Cambios')}
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Nota informativa */}
+      <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+        <div className="flex gap-3">
+          <AlertCircle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-blue-800">
+            <p className="font-semibold mb-1">{t('Esta información aparecerá en:')}</p>
+            <ul className="list-disc list-inside space-y-1 text-blue-700">
+              <li>{t('Todos los tickets de venta impresos')}</li>
+              <li>{t('Reportes Excel exportados desde Analíticas')}</li>
+              <li>{t('Reportes de tiempo de empleados')}</li>
+              <li>{t('Cualquier documento generado por el sistema')}</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+
+
+
+
+      {/* Formulario */}
+      <div className="bg-white rounded-xl shadow-sm p-6 max-w-2xl">
+        <div className="space-y-6">
+          {/* Nombre de la empresa */}
+          <div>
+            <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+              <Building2 className="w-4 h-4 text-gray-500" />
+              {t('Nombre de la Empresa')} *
+            </label>
+            <input
+              type="text"
+              value={settings.company_name}
+              onChange={(e) => setSettings({ ...settings, company_name: e.target.value })}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Ej: LIN-Caisse"
+              required
+            />
+            <p className="text-xs text-gray-500 mt-1">{t('Este nombre aparecerá en todos los documentos')}</p>
+          </div>
+
+          {/* Dirección */}
+          <div>
+            <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+              <MapPin className="w-4 h-4 text-gray-500" />
+              {t('Dirección')}
+            </label>
+            <textarea
+              value={settings.address}
+              onChange={(e) => setSettings({ ...settings, address: e.target.value })}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Ej: Calle Principal #123, Ciudad"
+              rows={3}
+            />
+            <p className="text-xs text-gray-500 mt-1">{t('Dirección física de la empresa')}</p>
+          </div>
+
+          {/* Teléfono */}
+          <div>
+            <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+              <Phone className="w-4 h-4 text-gray-500" />
+              {t('Número de Teléfono')}
+            </label>
+            <input
+              type="tel"
+              value={settings.phone}
+              onChange={(e) => setSettings({ ...settings, phone: e.target.value })}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Ej: +34 000 000 000"
+            />
+            <p className="text-xs text-gray-500 mt-1">{t('Número de contacto para clientes')}</p>
+          </div>
+
+          {/* Instagram */}
+          <div>
+            <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+              <Instagram className="w-4 h-4 text-gray-500" />
+              {t('Enlace de Instagram')}
+            </label>
+            <input
+              type="url"
+              value={settings.instagram_link || ''}
+              onChange={(e) => setSettings({ ...settings, instagram_link: e.target.value })}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Ej: https://www.instagram.com/tu_tienda"
+            />
+            <p className="text-xs text-gray-500 mt-1">{t('Enlace directo a tu perfil de Instagram')}</p>
+          </div>
+        </div>
+
+        {/* Vista previa */}
+        <div className="mt-8 pt-6 border-t border-gray-200">
+          <h3 className="text-sm font-semibold text-gray-900 mb-3">{t('Vista Previa (Tickets)')}</h3>
+          <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 font-mono text-sm">
+            <div className="text-center space-y-1">
+              <p className="font-bold text-base">{settings.company_name || t('Nombre de empresa')}</p>
+              {settings.address && <p className="text-xs text-gray-600">{settings.address}</p>}
+              {settings.phone && <p className="text-xs text-gray-600">Tel: {settings.phone}</p>}
+            </div>
+            <div className="border-t border-gray-300 my-3"></div>
+            <p className="text-xs text-gray-500 text-center">{t('Información de pedido...')}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,1247 @@
+import { ShoppingCart, Package, BarChart3, ClipboardList, LogOut, Users, Tag, DollarSign, Truck, ChevronDown, Calculator, Clock, Shield, Building2, Settings, Server, Database, Bell, X, Menu } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+import { useLanguage } from '../contexts/LanguageContext';
+import { useCurrency } from '../contexts/CurrencyContext';
+import { useState, useRef, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
+import { toast } from 'react-hot-toast';
+import OnlineStatusToggle from './OnlineStatusToggle';
+import { InstallPWA } from './InstallPWA';
+
+interface NavigationProps {
+  currentView: string;
+  onViewChange: (view: string) => void;
+}
+
+interface NavItem {
+  id: string;
+  label: string;
+  icon: React.ElementType;
+  roles: string[];
+}
+
+interface NavGroup {
+  name: string;
+  items: NavItem[];
+}
+
+export function Navigation({ currentView, onViewChange }: NavigationProps) {
+  const { user, profile, signOut } = useAuth();
+  const { t, currentLanguage } = useLanguage();
+  const { formatCurrency } = useCurrency();
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const dropdownRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
+  const [showCloseCashModal, setShowCloseCashModal] = useState(false);
+  const [closingAmount, setClosingAmount] = useState('');
+  const [closingLoading, setClosingLoading] = useState(false);
+
+  const [userPermissions, setUserPermissions] = useState<{ [key: string]: boolean }>({});
+  const [cashBreakdown, setCashBreakdown] = useState({
+    openingAmount: 0,
+    totalSales: 0,
+    totalWithdrawals: 0,
+    expectedClosing: 0,
+    sessionIds: [] as string[]
+  });
+  const [showOpenCashModal, setShowOpenCashModal] = useState(false);
+  const [openingAmount, setOpeningAmount] = useState('');
+  const [openingLoading, setOpeningLoading] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
+  
+  const [sessionNotifications, setSessionNotifications] = useState<Array<{id: string, type?: string, amount?: string, createdAt: string}>>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const notificationsRef = useRef<HTMLDivElement | null>(null);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    const handleNewNotif = (e: any) => {
+      const dismissed = JSON.parse(localStorage.getItem('dismissedNotifications') || '[]');
+      if (dismissed.includes(e.detail.id)) return;
+      
+      const newNotif = { ...e.detail, type: e.detail.type || 'sale' };
+      setSessionNotifications(prev => [newNotif, ...prev].slice(0, 50));
+    };
+
+    const handleClickOutside = (e: MouseEvent) => {
+      if (notificationsRef.current && !notificationsRef.current.contains(e.target as Node)) {
+        setShowNotifications(false);
+      }
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setShowUserMenu(false);
+      }
+    };
+
+    window.addEventListener('global-new-notification', handleNewNotif);
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      window.removeEventListener('global-new-notification', handleNewNotif);
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+
+  // Cargar notificaciones offline/pasadas
+  useEffect(() => {
+    if (profile?.role !== 'admin' && profile?.role !== 'super_admin') return;
+
+    const loadMissedNotifications = async () => {
+      const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const dismissed = JSON.parse(localStorage.getItem('dismissedNotifications') || '[]');
+
+      try {
+        const { data: ordersData, error: ordersErr } = await supabase
+          .from('orders')
+          .select('id, total, created_at')
+          .eq('status', 'completed')
+          .gt('created_at', oneWeekAgo);
+
+        if (ordersErr) throw ordersErr;
+
+        const { data: sessions, error: sessionsErr } = await supabase
+          .from('cash_register_sessions')
+          .select('id, opened_at, closed_at, opening_amount')
+          .gt('opened_at', oneWeekAgo);
+          
+        if (sessionsErr) throw sessionsErr;
+
+        let allNotifs: any[] = [];
+        
+        if (ordersData) {
+          ordersData.forEach(o => {
+            allNotifs.push({
+               id: o.id,
+               type: 'sale',
+               amount: formatCurrency(o.total),
+               createdAt: o.created_at
+            });
+          });
+        }
+        
+        if (sessions) {
+          sessions.forEach(s => {
+            allNotifs.push({
+               id: `open-${s.id}`,
+               type: 'cash_open',
+               amount: formatCurrency(s.opening_amount || 0),
+               createdAt: s.opened_at
+            });
+            
+            if (s.closed_at) {
+               allNotifs.push({
+                  id: `close-${s.id}`,
+                  type: 'cash_close',
+                  amount: '',
+                  createdAt: s.closed_at
+               });
+            }
+          });
+        }
+        
+        allNotifs = allNotifs.filter(n => !dismissed.includes(n.id));
+        
+        setSessionNotifications(prev => {
+           const prevIds = new Set(prev.map(n => n.id));
+           const newNotifs = allNotifs.filter(n => !prevIds.has(n.id));
+           const combined = [...prev, ...newNotifs];
+           combined.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+           return combined.slice(0, 50);
+        });
+      } catch (err) {
+        console.error('Error loading missed notifications:', err);
+      }
+    };
+
+    loadMissedNotifications();
+  }, [profile?.role, formatCurrency]);
+
+  const navGroups: NavGroup[] = [
+    {
+      name: t('nav.sales'),
+      items: [
+        { id: 'pos', label: t('nav.pos'), icon: ShoppingCart, roles: ['super_admin', 'admin', 'cashier', 'barista'] },
+        { id: 'orders', label: t('nav.orders'), icon: ClipboardList, roles: ['super_admin', 'admin', 'cashier', 'barista', 'waiter'] },
+        // { id: 'oscario-tracking', label: '🚚 Tracking Oscario', icon: Truck, roles: ['super_admin', 'admin', 'cashier', 'barista', 'waiter'] },
+      ]
+    },
+    {
+      name: t('nav.inventory'),
+      items: [
+        { id: 'products', label: t('nav.products'), icon: Package, roles: ['super_admin', 'admin'] },
+        { id: 'categories', label: t('nav.categories'), icon: Tag, roles: ['super_admin', 'admin'] },
+        { id: 'users', label: t('nav.users'), icon: Users, roles: ['super_admin', 'admin'] },
+      ]
+    },
+    {
+      name: t('nav.finance'),
+      items: [
+        { id: 'cash', label: t('nav.cash'), icon: Calculator, roles: ['super_admin', 'admin', 'cashier'] },
+        { id: 'time-tracking', label: t('nav.time-tracking'), icon: Clock, roles: ['super_admin', 'admin'] },
+        { id: 'suppliers', label: t('nav.suppliers'), icon: Truck, roles: ['super_admin', 'admin'] },
+        { id: 'clients', label: t('nav.clients'), icon: Users, roles: ['super_admin', 'admin', 'cashier'] },
+        { id: 'expenses', label: t('nav.expenses'), icon: DollarSign, roles: ['super_admin', 'admin'] },
+        { id: 'analytics', label: t('nav.analytics'), icon: BarChart3, roles: ['super_admin', 'admin'] },
+        { id: 'stock-analytics', label: t('nav.stock-analytics'), icon: ClipboardList, roles: ['super_admin', 'admin'] },
+      ]
+    },
+    {
+      name: t('nav.system'),
+      items: [
+        { id: 'role-management', label: t('nav.role-management'), icon: Shield, roles: ['super_admin'] },
+        { id: 'company-settings', label: t('nav.company-settings'), icon: Building2, roles: ['super_admin'] },
+        { id: 'app-settings', label: t('nav.app-settings'), icon: Settings, roles: ['super_admin'] },
+        { id: 'server', label: t('nav.server'), icon: Server, roles: ['super_admin'] },
+        { id: 'backup', label: t('nav.backup'), icon: Database, roles: ['super_admin'] },
+      ]
+    }
+  ];
+
+  // Verificar si el cajero debe abrir caja al iniciar sesión
+  useEffect(() => {
+    const checkCashSession = async () => {
+      if (!user || profile?.role !== 'cashier') return;
+
+      try {
+        // Calcular el inicio del día laboral (02:00 AM)
+        const now = new Date();
+        const currentHour = now.getHours();
+
+        // Si es antes de las 02:00 AM, el día laboral comenzó ayer a las 02:00 AM
+        // Si es después de las 02:00 AM, el día laboral comenzó hoy a las 02:00 AM
+        const workdayStart = new Date(now);
+        if (currentHour < 2) {
+          // Es madrugada antes de las 02:00, restar un día
+          workdayStart.setDate(workdayStart.getDate() - 1);
+        }
+        workdayStart.setHours(2, 0, 0, 0); // Establecer a las 02:00:00
+
+        // Verificar si ya tiene CUALQUIER sesión (abierta o cerrada) desde las 02:00 AM del día laboral
+        const { data: sessions, error } = await supabase
+          .from('cash_register_sessions')
+          .select('id, status')
+          .eq('employee_id', user.id)
+          .gte('opened_at', workdayStart.toISOString());
+
+        if (error) {
+          console.error('Error checking cash session:', error);
+          return;
+        }
+
+        console.log(`🕐 Verificación de caja - Día laboral desde: ${workdayStart.toLocaleString('es-ES')}`);
+        console.log(`📊 Sesiones encontradas en este período: ${sessions?.length || 0}`);
+
+        // Si no tiene ninguna sesión en el período actual, mostrar modal de apertura
+        if (!sessions || sessions.length === 0) {
+          setShowOpenCashModal(true);
+        }
+      } catch (err) {
+        console.error('Error checking cash session:', err);
+      }
+    };
+
+    checkCashSession();
+  }, [user, profile?.role]);
+
+  // Cargar permisos del usuario desde la base de datos
+  useEffect(() => {
+    const fetchUserPermissions = async () => {
+      if (!profile?.role) return;
+
+      try {
+        const { data, error } = await supabase
+          .from('role_permissions')
+          .select('page_id, can_access')
+          .eq('role', profile.role)
+          .eq('can_access', true);
+
+        if (error) {
+          console.error('Error fetching permissions:', error);
+          return;
+        }
+
+        // Crear un mapa de permisos por page_id
+        const permissionsMap: { [key: string]: boolean } = {};
+        data?.forEach(perm => {
+          permissionsMap[perm.page_id] = perm.can_access;
+        });
+
+        setUserPermissions(permissionsMap);
+      } catch (err) {
+        console.error('Error loading permissions:', err);
+      }
+    };
+
+    fetchUserPermissions();
+
+    // Suscribirse a cambios en permisos para actualizar en tiempo real
+    const channel = supabase
+      .channel('role-permissions-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'role_permissions',
+          filter: `role=eq.${profile?.role}`
+        },
+        () => {
+          fetchUserPermissions();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [profile?.role]);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+
+      if (openMenu) {
+        const dropdownRef = dropdownRefs.current[openMenu];
+        if (dropdownRef && !dropdownRef.contains(target) && !target.parentElement?.closest('.nav-dropdown')) {
+          setOpenMenu(null);
+        }
+      }
+      if (showUserMenu && userMenuRef.current && !userMenuRef.current.contains(target)) {
+        setShowUserMenu(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [openMenu, showUserMenu]);
+
+  const handleMenuClick = (groupName: string, event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (openMenu === groupName) {
+      setOpenMenu(null);
+    } else {
+      setOpenMenu(groupName);
+    }
+  };
+
+  const renderMenuItem = (item: NavItem) => {
+    const Icon = item.icon;
+    const isActive = currentView === item.id;
+
+    return (
+      <button
+        key={item.id}
+        onClick={() => {
+          onViewChange(item.id);
+          setOpenMenu(null);
+        }}
+        className={`flex items-center gap-3 w-full px-4 py-3 text-sm transition-all duration-200 rounded-xl mx-2 ${isActive
+          ? 'gradient-primary text-white font-bold shadow-elegant scale-105'
+          : 'text-gray-700 hover:bg-gradient-to-r hover:from-amber-50 hover:to-orange-50 font-medium hover:scale-105 hover:shadow-md'
+          }`}
+      >
+        <Icon className={`w-5 h-5 ${isActive ? 'text-white' : 'text-amber-500'}`} />
+        <span>{item.label}</span>
+        {isActive && (
+          <div className="w-2 h-2 rounded-full bg-white ml-auto animate-pulse shadow-lg" />
+        )}
+      </button>
+    );
+  };
+
+  const renderGroup = (group: NavGroup, isMobile: boolean = false) => {
+    // Filtrar items basándose en permisos de la base de datos
+    const visibleItems = group.items.filter(item =>
+      profile?.role === 'super_admin' || 
+      userPermissions[item.id] === true || 
+      (item.roles.includes(profile?.role || ''))
+    );
+
+    if (visibleItems.length === 0) return null;
+
+    // For cashier, barista, and waiter users, show Sales items as individual buttons instead of dropdown
+    const isNonAdminRole = profile?.role === 'cashier' || profile?.role === 'barista' || profile?.role === 'waiter';
+    const isSalesGroup = group.name === t('nav.sales'); // Compare with translated name
+
+    if (isNonAdminRole && isSalesGroup) {
+      return (
+        <div key={group.name} className="flex items-center gap-2">
+          {visibleItems.map(item => {
+            const Icon = item.icon;
+            const isActive = currentView === item.id;
+
+            return (
+              <button
+                key={item.id}
+                onClick={() => onViewChange(item.id)}
+                className={`flex items-center gap-2 px-5 py-3 rounded-xl font-semibold transition-all duration-200 shadow-sm ${isActive
+                  ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md'
+                  : 'text-gray-700 hover:bg-gradient-to-r hover:from-amber-50 hover:to-orange-50 hover:shadow-md'
+                  }`}
+              >
+                <Icon className="w-4 h-4" />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      );
+    }
+
+    const isActive = visibleItems.some(item => currentView === item.id);
+
+    return (
+      <div
+        key={group.name}
+        className={`relative ${isMobile ? 'flex-shrink-0' : ''}`}
+        ref={el => dropdownRefs.current[group.name] = el}
+      >
+        <button
+          onClick={(e) => handleMenuClick(group.name, e)}
+          className={`flex items-center gap-2 px-5 py-3 rounded-xl font-semibold transition-all duration-200 shadow-sm ${isActive
+            ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md'
+            : 'text-gray-700 hover:bg-gradient-to-r hover:from-amber-50 hover:to-orange-50 hover:shadow-md'
+            }`}
+        >
+          <span>{group.name}</span>
+          <ChevronDown
+            className={`w-4 h-4 transition-transform ${openMenu === group.name ? 'transform rotate-180' : ''
+              }`}
+          />
+        </button>
+
+        {openMenu === group.name && (
+          <div
+            className={`absolute top-full left-0 mt-2 ${isMobile ? 'w-44' : 'w-52'
+              } py-2 bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200 z-50 nav-dropdown animate-fadeIn`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {visibleItems.map(renderMenuItem)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const handleOpenCashSubmit = async () => {
+    if (!user) return;
+
+    const amount = parseFloat(openingAmount);
+    if (isNaN(amount) || amount < 0) {
+      toast.error(t('Ingrese un monto de apertura válido (>= 0)'));
+      return;
+    }
+
+    setOpeningLoading(true);
+
+    try {
+      // Crear nueva sesión de caja
+      const { error } = await supabase
+        .from('cash_register_sessions')
+        .insert({
+          employee_id: user.id,
+          opening_amount: amount,
+          opened_at: new Date().toISOString(),
+          status: 'open'
+        });
+
+      if (error) throw error;
+
+      toast.success(t('Caja abierta exitosamente'));
+      setShowOpenCashModal(false);
+      setOpeningAmount('');
+    } catch (err: any) {
+      console.error('Error al abrir caja:', err);
+      toast.error(`${t('No se pudo abrir la caja:')} ${err.message || err}`);
+    } finally {
+      setOpeningLoading(false);
+    }
+  };
+
+  const fetchCashBreakdown = async () => {
+    if (!user) return;
+
+    try {
+      // Calcular el inicio del día laboral (02:00 AM)
+      const now = new Date();
+      const currentHour = now.getHours();
+
+      const workdayStart = new Date(now);
+      if (currentHour < 2) {
+        workdayStart.setDate(workdayStart.getDate() - 1);
+      }
+      workdayStart.setHours(2, 0, 0, 0);
+
+      const workdayEnd = new Date(workdayStart);
+      workdayEnd.setDate(workdayEnd.getDate() + 1); // Siguiente día a las 02:00 AM
+
+      // Get all open sessions for the current workday
+      const { data: sessions, error: sessionsErr } = await supabase
+        .from('cash_register_sessions')
+        .select('id, opened_at, opening_amount')
+        .eq('employee_id', user.id)
+        .eq('status', 'open')
+        .is('closed_at', null)
+        .gte('opened_at', workdayStart.toISOString())
+        .lt('opened_at', workdayEnd.toISOString())
+        .order('opened_at', { ascending: true });
+
+      if (sessionsErr) throw sessionsErr;
+
+      if (!sessions || sessions.length === 0) {
+        setCashBreakdown({
+          openingAmount: 0,
+          totalSales: 0,
+          totalWithdrawals: 0,
+          expectedClosing: 0,
+          sessionIds: []
+        });
+        return;
+      }
+
+      const sessionIds = sessions.map(s => s.id);
+      const openingAmount = sessions[0].opening_amount;
+
+      // Get total sales from completed orders during the workday
+      const { data: orders, error: ordersErr } = await supabase
+        .from('orders')
+        .select('total')
+        .eq('employee_id', user.id)
+        .eq('status', 'completed')
+        .gte('created_at', workdayStart.toISOString())
+        .lt('created_at', workdayEnd.toISOString());
+
+      if (ordersErr) throw ordersErr;
+
+      const totalSales = (orders || []).reduce((sum, order) => sum + order.total, 0);
+
+      // Get total withdrawals
+      const { data: withdrawals, error: withdrawalsErr } = await supabase
+        .from('cash_withdrawals')
+        .select('amount')
+        .in('session_id', sessionIds);
+
+      if (withdrawalsErr) throw withdrawalsErr;
+
+      const totalWithdrawals = (withdrawals || []).reduce((sum, w) => sum + w.amount, 0);
+
+      // Calculate expected closing
+      const expectedClosing = openingAmount + totalSales - totalWithdrawals;
+
+      setCashBreakdown({
+        openingAmount,
+        totalSales,
+        totalWithdrawals,
+        expectedClosing,
+        sessionIds
+      });
+    } catch (err) {
+      console.error('Error fetching cash breakdown:', err);
+      toast.error(t('Error al cargar información de caja'));
+    }
+  };
+
+  const handleCloseCashSubmit = async () => {
+    if (!user) return;
+    const amount = parseFloat(closingAmount);
+    if (isNaN(amount) || amount < 0) {
+      toast.error(t('Ingrese un monto de cierre válido (>= 0)'));
+      return;
+    }
+    setClosingLoading(true);
+    try {
+      // Calcular el inicio del día laboral (02:00 AM)
+      const now = new Date();
+      const currentHour = now.getHours();
+
+      const workdayStart = new Date(now);
+      if (currentHour < 2) {
+        workdayStart.setDate(workdayStart.getDate() - 1);
+      }
+      workdayStart.setHours(2, 0, 0, 0);
+
+      const workdayEnd = new Date(workdayStart);
+      workdayEnd.setDate(workdayEnd.getDate() + 1); // Siguiente día a las 02:00 AM
+
+      // Obtener todas las sesiones abiertas del día laboral actual
+      const { data: sessions, error: fetchErr } = await supabase
+        .from('cash_register_sessions')
+        .select('id, opened_at, opening_amount')
+        .eq('employee_id', user.id)
+        .eq('status', 'open')
+        .is('closed_at', null)
+        .gte('opened_at', workdayStart.toISOString())
+        .lt('opened_at', workdayEnd.toISOString())
+        .order('opened_at', { ascending: true });
+      if (fetchErr) throw fetchErr;
+
+      if (!sessions || sessions.length === 0) {
+        toast(t('No hay sesión de caja abierta para cerrar. Se cerrará la sesión de usuario.'));
+        setShowCloseCashModal(false);
+        await signOut();
+        return;
+      }
+
+      const sessionIds = sessions.map(s => s.id);
+
+      // Obtener pedidos del día laboral para el ticket
+      const { data: orders, error: ordersErr } = await supabase
+        .from('orders')
+        .select(`
+          id,
+          total,
+          created_at,
+          order_items (
+            quantity,
+            unit_price,
+            products (name)
+          )
+        `)
+        .eq('employee_id', user.id)
+        .gte('created_at', workdayStart.toISOString())
+        .lt('created_at', workdayEnd.toISOString())
+        .eq('status', 'completed');
+
+      if (ordersErr) throw ordersErr;
+
+      // Obtener retiros del día para el ticket
+      const { data: withdrawals, error: withdrawalsErr } = await supabase
+        .from('cash_withdrawals')
+        .select('amount, reason, withdrawn_at, notes')
+        .in('session_id', sessionIds);
+
+      if (withdrawalsErr) throw withdrawalsErr;
+
+      // Calcular totales para el ticket
+      const totalSales = (orders || []).reduce((sum, order) => sum + order.total, 0);
+      const totalWithdrawals = (withdrawals || []).reduce((sum, w) => sum + w.amount, 0);
+
+      // Usar la suma de todas las aperturas por si hubo múltiples sesiones (ej. refuerzo de caja)
+      const totalOpenings = sessions.reduce((sum, session) => sum + session.opening_amount, 0);
+      const expectedClosing = totalOpenings + totalSales - totalWithdrawals;
+      const difference = amount - expectedClosing;
+
+      // Generar ticket de cierre
+      const ticketContent = `
+        <div style="font-family: monospace; max-width: 300px; margin: 0 auto; padding: 10px;">
+          <h2 style="text-align: center; margin-bottom: 10px;">${t('CIERRE DE CAJA')}</h2>
+          <div style="border-bottom: 1px solid #000; margin-bottom: 10px;"></div>
+
+          <div style="margin-bottom: 10px;">
+            <strong>${t('Empleado:')}</strong> ${profile?.full_name || user.email}
+          </div>
+
+          <div style="margin-bottom: 10px;">
+            <strong>${t('Fecha:')}</strong> ${new Date().toLocaleDateString(currentLanguage === 'es' ? 'es-ES' : 'fr-FR')}
+          </div>
+
+          <div style="border-bottom: 1px solid #000; margin: 10px 0;"></div>
+
+          <div style="margin-bottom: 10px;">
+            <strong>${t('RESUMEN FINANCIERO')}</strong>
+          </div>
+
+          <div style="margin-bottom: 5px;">
+            <strong>${t('Apertura')}:</strong> ${formatCurrency(totalOpenings)}
+          </div>
+
+          <div style="margin-bottom: 5px; color: green;">
+            <strong>${t('Ventas')} (+):</strong> ${formatCurrency(totalSales)}
+          </div>
+
+          <div style="margin-bottom: 5px; color: orange;">
+            <strong>${t('Retiros')} (-):</strong> ${formatCurrency(totalWithdrawals)}
+          </div>
+
+          <div style="margin-bottom: 5px; padding: 5px; background-color: #e3f2fd; border: 1px solid #2196f3;">
+            <strong>${t('Cierre Esperado')}:</strong> ${formatCurrency(expectedClosing)}
+          </div>
+
+          <div style="margin-bottom: 5px;">
+            <strong>${t('Cierre Real')}:</strong> ${formatCurrency(amount)}
+          </div>
+
+          <div style="margin-bottom: 5px; padding: 5px; background-color: ${difference === 0 ? '#e8f5e9' : difference > 0 ? '#e3f2fd' : '#ffebee'
+        }; border: 1px solid ${difference === 0 ? '#4caf50' : difference > 0 ? '#2196f3' : '#f44336'
+        };">
+            <strong>${t('Diferencia')}:</strong> ${formatCurrency(difference)} ${difference === 0 ? '✓' : ''}
+          </div>
+
+          <div style="border-bottom: 1px solid #000; margin: 10px 0;"></div>
+
+          <div style="margin-bottom: 10px;">
+            <strong>${t('PEDIDOS DEL DÍA')} (${(orders || []).length})</strong>
+          </div>
+
+          ${(orders || []).length > 0 ? (orders || []).map(order => `
+            <div style="margin-bottom: 8px; border-bottom: 1px dashed #ccc; padding-bottom: 5px;">
+              <div><strong>${t('Pedido #')}${order.id.slice(-8)}</strong></div>
+              <div>${t('Hora:')} ${new Date(order.created_at).toLocaleTimeString(currentLanguage === 'es' ? 'es-ES' : 'fr-FR', { hour: '2-digit', minute: '2-digit' })}</div>
+              <div>Total: ${formatCurrency(order.total)}</div>
+              <div style="font-size: 12px; margin-top: 3px;">
+                ${order.order_items.map((item: any) => {
+                  const pName = Array.isArray(item.products) ? item.products[0]?.name : item.products?.name;
+                  return `${item.quantity}x ${pName || t('Producto')}`;
+                }).join(', ')}
+              </div>
+            </div>
+          `).join('') : `<div style="text-align: center; color: #666; padding: 10px;">${t('Sin pedidos')}</div>`}
+
+          ${(withdrawals || []).length > 0 ? `
+            <div style="border-bottom: 1px solid #000; margin: 10px 0;"></div>
+
+            <div style="margin-bottom: 10px;">
+              <strong>${t('RETIROS DE CAJA')} (${(withdrawals || []).length})</strong>
+            </div>
+
+            ${(withdrawals || []).map(withdrawal => `
+              <div style="margin-bottom: 8px; border-bottom: 1px dashed #ccc; padding-bottom: 5px;">
+                <div><strong>${formatCurrency(withdrawal.amount)}</strong></div>
+                <div style="font-size: 12px;">${t('Motivo')}: ${withdrawal.reason}</div>
+                <div style="font-size: 12px;">${t('Hora:')} ${new Date(withdrawal.withdrawn_at).toLocaleTimeString(currentLanguage === 'es' ? 'es-ES' : 'fr-FR', { hour: '2-digit', minute: '2-digit' })}</div>
+                ${withdrawal.notes ? `<div style="font-size: 11px; color: #666;">${t('Nota')}: ${withdrawal.notes}</div>` : ''}
+              </div>
+            `).join('')}
+          ` : ''}
+
+          <div style="border-bottom: 1px solid #000; margin: 10px 0;"></div>
+
+          <div style="text-align: center; margin-top: 20px; font-size: 12px;">
+            ${t('Generado el')} ${new Date().toLocaleString(currentLanguage === 'es' ? 'es-ES' : 'fr-FR')}
+          </div>
+        </div>
+      `;
+
+      // Imprimir ticket directamente
+      const printWindow = window.open('', '_blank', 'width=400,height=600');
+      if (printWindow) {
+        printWindow.document.write(`
+          <html>
+            <head>
+              <title>Cierre de Caja</title>
+              <style>
+                @media print {
+                  body { margin: 0; }
+                  @page { size: auto; margin: 5mm; }
+                }
+              </style>
+            </head>
+            <body>
+              ${ticketContent}
+            </body>
+          </html>
+        `);
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.print();
+        // Cerrar ventana después de imprimir
+        printWindow.onafterprint = () => printWindow.close();
+      }
+
+      // ACTUALIZAR SESIONES EN LA BASE DE DATOS
+      // Cerramos todas las sesiones abiertas del día laboral
+      const { error: updateErr } = await supabase
+        .from('cash_register_sessions')
+        .update({
+          status: 'closed',
+          closed_at: new Date().toISOString(),
+          closing_amount: 0 // Por defecto 0
+        })
+        .in('id', sessionIds);
+
+      if (updateErr) throw updateErr;
+
+      // Asignamos el monto real solo a la última sesión para evitar duplicar montos en el dashboard
+      const { error: finalUpdateErr } = await supabase
+        .from('cash_register_sessions')
+        .update({
+          closing_amount: amount,
+          notes: `Cierre de caja completo. Diferencia: ${difference}`
+        })
+        .eq('id', sessionIds[sessionIds.length - 1]);
+
+      if (finalUpdateErr) throw finalUpdateErr;
+
+      toast.success(t('Cierre de caja registrado e impreso.'));
+      setShowCloseCashModal(false);
+      await signOut();
+    } catch (err: any) {
+      console.error('Error en cierre de caja:', err);
+      toast.error(`${t('No se pudo cerrar la caja:')} ${err.message || err}`);
+    } finally {
+      setClosingLoading(false);
+    }
+  };
+
+  // formatCurrency se importa desde el contexto de moneda
+
+
+  const handleLogoutClick = async () => {
+    if (profile?.role === 'cashier') {
+      await fetchCashBreakdown();
+      setShowCloseCashModal(true);
+    } else if (profile?.role === 'admin' || profile?.role === 'super_admin') {
+      // Para administradores, mostrar opción de cerrar caja o salir directamente
+      const confirmClose = window.confirm(t('¿Desea cerrar la sesión de caja antes de salir?'));
+      if (confirmClose) {
+        await fetchCashBreakdown();
+        setShowCloseCashModal(true);
+      } else {
+        signOut();
+      }
+    } else {
+      signOut();
+    }
+  };
+
+  return (
+    <>
+      <nav className={`glass border-b-2 border-white/50 shadow-elegant sticky top-0 transition-all duration-300 ${showUserMenu ? 'z-[10000]' : 'z-50'}`}>
+        <div className="w-full px-6">
+          <div className="flex items-center justify-between h-20">
+            <div className="flex-shrink-0 flex items-center gap-3 lg:gap-4">
+              <button
+                onClick={() => setIsMobileMenuOpen(true)}
+                className="lg:hidden p-2.5 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 shadow-sm active:scale-95 transition-all"
+              >
+                <Menu className="w-6 h-6 text-amber-600" />
+              </button>
+              <div className="w-12 h-12 lg:w-16 lg:h-16 rounded-full flex items-center justify-center shadow-elegant hover:shadow-elegant-hover transition-all duration-300 hover:scale-105 group cursor-pointer overflow-hidden border-2 border-white bg-white">
+                <img src="/logo.png" alt="Logo Linventory" className="w-full h-full object-contain p-1" />
+              </div>
+              <div className="hidden sm:block">
+                <h1 className="text-xl lg:text-3xl font-black text-gradient-vibrant tracking-tight">Linventory</h1>
+                <p className="text-[10px] lg:text-sm text-gray-600 font-semibold">{t('Sistema de Gestión')}</p>
+              </div>
+            </div>
+
+            <div className="hidden lg:flex flex-1 justify-center">
+              <div className="flex items-center space-x-4">
+                <InstallPWA />
+                {navGroups.map(group => renderGroup(group))}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4">
+              {/* Notification Bell (Only Admin/Super Admin) - Desktop Only */}
+              {(profile?.role === 'admin' || profile?.role === 'super_admin') && (
+                <div className="hidden lg:block relative" ref={notificationsRef}>
+                  <button
+                    onClick={() => setShowNotifications(!showNotifications)}
+                    className="p-2 bg-white border border-gray-200 rounded-xl hover:border-amber-300 transition-all shadow-sm hover:shadow-md relative"
+                  >
+                    <Bell className="w-5 h-5 text-gray-700" />
+                    {sessionNotifications.length > 0 && (
+                      <span className="absolute -top-1 -right-1 flex h-4 w-4">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-4 w-4 bg-red-500 text-[9px] text-white font-bold flex items-center justify-center">
+                          {sessionNotifications.length}
+                        </span>
+                      </span>
+                    )}
+                  </button>
+
+                  {showNotifications && (
+                    <div className="absolute right-0 top-full mt-2 w-72 bg-white rounded-2xl shadow-xl border border-gray-100 py-2 z-50 animate-fadeIn">
+                      <div className="px-4 py-3 border-b border-gray-100 flex justify-between items-center">
+                        <h3 className="font-bold text-gray-900">{t('Notificaciones')}</h3>
+                        <span className="text-xs text-gray-500 font-medium bg-gray-100 px-2 py-1 rounded-full">
+                          {sessionNotifications.length}
+                        </span>
+                      </div>
+                      <div className="max-h-[60vh] overflow-y-auto">
+                        {sessionNotifications.length === 0 ? (
+                          <div className="text-center py-6 text-gray-500 text-sm">
+                            {t('No hay notificaciones recientes')}
+                          </div>
+                        ) : (
+                          sessionNotifications.map(notif => (
+                            <div key={notif.id} className="px-4 py-3 border-b border-gray-50 hover:bg-gray-50 transition-colors relative group">
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSessionNotifications(prev => prev.filter(n => n.id !== notif.id));
+                                  const dismissed = JSON.parse(localStorage.getItem('dismissedNotifications') || '[]');
+                                  if (!dismissed.includes(notif.id)) dismissed.push(notif.id);
+                                  if (dismissed.length > 1000) dismissed.splice(0, dismissed.length - 1000);
+                                  localStorage.setItem('dismissedNotifications', JSON.stringify(dismissed));
+                                }}
+                                title="Ocultar"
+                                className="absolute right-3 top-3 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                              
+                              <p className={`text-sm font-bold flex items-center gap-1 ${
+                                notif.type === 'sale' ? 'text-green-600' : 
+                                notif.type === 'cash_open' ? 'text-amber-500' : 'text-red-500'
+                              }`}>
+                                {notif.type === 'sale' ? '💰 ' + t('Nueva Venta Realizada') :
+                                 notif.type === 'cash_open' ? '🔓 ' + t('Apertura de Caja') :
+                                 '🔐 ' + t('Cierre de Caja')}
+                              </p>
+                              
+                              {notif.amount && (
+                                <p className="text-sm text-gray-900 font-medium mt-1">
+                                  {notif.type === 'sale' ? t('Monto:') : t('Saldo Inicial:')} {notif.amount}
+                                </p>
+                              )}
+                              
+                              <p className="text-xs text-gray-400 mt-1">
+                                {new Date(notif.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}
+                              </p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                      {sessionNotifications.length > 0 && (
+                        <div className="p-2 border-t border-gray-100 mt-1">
+                          <button 
+                            onClick={() => onViewChange('analytics')}
+                            className="w-full py-2 text-xs text-center text-blue-600 hover:text-blue-800 hover:bg-blue-50 font-semibold transition-colors rounded-lg"
+                          >
+                            Ir a Estadísticas
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div ref={userMenuRef}>
+              {profile && (
+                <div className="relative">
+                  <button
+                    onClick={() => setShowUserMenu(!showUserMenu)}
+                    className="flex items-center gap-3 px-4 py-2 bg-white border border-gray-200 rounded-xl hover:border-amber-300 transition-all shadow-sm hover:shadow-md group"
+                  >
+                    <div className="w-10 h-10 gradient-primary rounded-full flex items-center justify-center text-white font-bold group-hover:shadow-lg transition-shadow">
+                      {profile.full_name?.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="hidden md:block text-left">
+                      <p className="text-sm font-bold text-gray-900">{profile.full_name}</p>
+                      <p className="text-xs text-gray-500 capitalize">{profile.role}</p>
+                    </div>
+                    <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${showUserMenu ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {showUserMenu && (
+                    <div className="absolute right-0 top-full mt-2 w-72 glass lg:rounded-2xl shadow-elegant lg:border-2 lg:border-white/50 py-2 animate-fadeIn z-[100] flex flex-col">
+                        <div className="px-4 py-3 border-b border-gray-200">
+                          <p className="text-sm font-bold text-gray-900">{profile.full_name}</p>
+                          <p className="text-xs text-gray-500">{user?.email}</p>
+                          <p className="text-xs text-amber-600 capitalize font-medium mt-1">{profile.role}</p>
+                        </div>
+
+                        <div className="px-2 py-2 space-y-1">
+                          <div className="px-2 py-1">
+                            <OnlineStatusToggle />
+                          </div>
+                          <div className="px-2 py-1">
+                            <InstallPWA variant="menu-item" />
+                          </div>
+                          <button
+                            onClick={handleLogoutClick}
+                            className="flex items-center gap-3 w-full px-4 py-3 text-red-600 hover:bg-red-50 rounded-xl transition-all font-bold"
+                          >
+                            <LogOut className="w-4 h-4" />
+                            <span>{t('Salir')}</span>
+                          </button>
+                        </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </nav>
+
+      {/* Mobile Burger Menu */}
+      {isMobileMenuOpen && (
+        <div className="fixed inset-0 z-[10001] flex lg:hidden">
+          {/* Backdrop */}
+          <div 
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm animate-fadeIn"
+            onClick={() => setIsMobileMenuOpen(false)}
+          />
+          
+          {/* Drawer */}
+          <div className="relative w-[85%] max-w-sm h-full bg-white shadow-2xl flex flex-col animate-slideInRight">
+            {/* Header */}
+            <div className="p-6 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 gradient-primary rounded-full flex items-center justify-center text-white font-bold shadow-md">
+                  <Menu className="w-5 h-5" />
+                </div>
+                <h2 className="text-lg font-bold text-gray-900">{t('Menú Principal')}</h2>
+              </div>
+              <button 
+                onClick={() => setIsMobileMenuOpen(false)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X className="w-6 h-6 text-gray-400" />
+              </button>
+            </div>
+
+            {/* Navigation Links */}
+            <div className="flex-1 overflow-y-auto px-4 py-6 custom-scrollbar">
+              {navGroups.map(group => {
+                const userRole = profile?.role?.toLowerCase();
+                const visibleItems = group.items.filter(item => 
+                  userRole === 'super_admin' || 
+                  userPermissions[item.id] === true || 
+                  item.roles.some(r => r.toLowerCase() === userRole)
+                );
+                
+                if (visibleItems.length === 0) return null;
+
+                return (
+                  <div key={group.name} className="mb-8">
+                    <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest px-2 mb-4">{group.name}</p>
+                    <div className="grid grid-cols-1 gap-2">
+                      {visibleItems.map(item => {
+                        const Icon = item.icon;
+                        const isActive = currentView === item.id;
+                        return (
+                          <button
+                            key={item.id}
+                            onClick={() => {
+                              onViewChange(item.id);
+                              setIsMobileMenuOpen(false);
+                            }}
+                            className={`w-full flex items-center gap-4 px-5 py-4 rounded-2xl text-base transition-all ${
+                              isActive 
+                                ? 'gradient-primary text-white font-bold shadow-md' 
+                                : 'text-gray-700 bg-white border border-gray-50 hover:bg-gray-50'
+                            }`}
+                          >
+                            <Icon className={`w-6 h-6 ${isActive ? 'text-white' : 'text-amber-500'}`} />
+                            <span>{item.label}</span>
+                            {isActive && <div className="ml-auto w-2 h-2 bg-white rounded-full" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Footer */}
+            <div className="p-6 border-t border-gray-100 bg-gray-50/30">
+              <p className="text-xs text-gray-400 text-center font-medium">
+                Linventory v1.0
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Navegación móvil ELIMINADA */}
+
+      {showCloseCashModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-amber-500 to-orange-500 text-white px-6 py-4 rounded-t-xl">
+              <h2 className="text-xl font-bold">{t('Cierre de Caja')}</h2>
+              <p className="text-sm text-white/90 mt-1">
+                {t('Revise el resumen y confirme el cierre')}
+              </p>
+            </div>
+
+            {/* Breakdown Summary */}
+            <div className="px-6 py-5 bg-gray-50 border-b border-gray-200">
+              <h3 className="text-sm font-semibold text-gray-700 mb-3 uppercase tracking-wide">
+                {t('Resumen del Día')}
+              </h3>
+
+              <div className="space-y-2">
+                {/* Opening Amount */}
+                <div className="flex justify-between items-center py-2 border-b border-gray-200">
+                  <span className="text-sm font-medium text-gray-700">{t('Apertura')}:</span>
+                  <span className="text-sm font-bold text-gray-900">
+                    {formatCurrency(cashBreakdown.openingAmount)}
+                  </span>
+                </div>
+
+                {/* Sales */}
+                <div className="flex justify-between items-center py-2 border-b border-gray-200">
+                  <span className="text-sm font-medium text-green-700">{t('Ventas')}:</span>
+                  <span className="text-sm font-bold text-green-700">
+                    + {formatCurrency(cashBreakdown.totalSales)}
+                  </span>
+                </div>
+
+                {/* Withdrawals */}
+                <div className="flex justify-between items-center py-2 border-b border-gray-200">
+                  <span className="text-sm font-medium text-orange-700">{t('Retiros')}:</span>
+                  <span className="text-sm font-bold text-orange-700">
+                    - {formatCurrency(cashBreakdown.totalWithdrawals)}
+                  </span>
+                </div>
+
+                {/* Expected Closing */}
+                <div className="flex justify-between items-center py-3 bg-blue-50 -mx-3 px-3 rounded-lg mt-3">
+                  <span className="text-sm font-semibold text-blue-900">{t('Cierre Esperado')}:</span>
+                  <span className="text-lg font-bold text-blue-900">
+                    {formatCurrency(cashBreakdown.expectedClosing)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Input Section */}
+            <div className="px-6 py-5">
+              <label className="block text-sm font-semibold text-gray-900 mb-2">
+                {t('Monto Real en Caja')}
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={closingAmount}
+                onChange={(e) => setClosingAmount(e.target.value)}
+                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg text-lg font-bold focus:border-amber-500 focus:ring-2 focus:ring-amber-200 transition-all"
+                placeholder="0.00"
+                autoFocus
+              />
+
+              {/* Difference Display */}
+              {closingAmount && !isNaN(parseFloat(closingAmount)) && (
+                <div className={`mt-4 p-3 rounded-lg ${parseFloat(closingAmount) - cashBreakdown.expectedClosing === 0
+                  ? 'bg-green-50 border border-green-200'
+                  : parseFloat(closingAmount) - cashBreakdown.expectedClosing > 0
+                    ? 'bg-blue-50 border border-blue-200'
+                    : 'bg-red-50 border border-red-200'
+                  }`}>
+                  <div className="flex justify-between items-center">
+                    <span className={`text-sm font-semibold ${parseFloat(closingAmount) - cashBreakdown.expectedClosing === 0
+                      ? 'text-green-900'
+                      : parseFloat(closingAmount) - cashBreakdown.expectedClosing > 0
+                        ? 'text-blue-900'
+                        : 'text-red-900'
+                      }`}>
+                      {t('Diferencia')}:
+                    </span>
+                    <span className={`text-lg font-bold ${parseFloat(closingAmount) - cashBreakdown.expectedClosing === 0
+                      ? 'text-green-900'
+                      : parseFloat(closingAmount) - cashBreakdown.expectedClosing > 0
+                        ? 'text-blue-900'
+                        : 'text-red-900'
+                      }`}>
+                      {formatCurrency(parseFloat(closingAmount) - cashBreakdown.expectedClosing)}
+                      {parseFloat(closingAmount) - cashBreakdown.expectedClosing === 0 && ' ✓'}
+                    </span>
+                  </div>
+                  {parseFloat(closingAmount) - cashBreakdown.expectedClosing !== 0 && (
+                    <p className={`text-xs mt-1 ${parseFloat(closingAmount) - cashBreakdown.expectedClosing > 0
+                      ? 'text-blue-700'
+                      : 'text-red-700'
+                      }`}>
+                      {parseFloat(closingAmount) - cashBreakdown.expectedClosing > 0
+                        ? t('Hay más dinero del esperado')
+                        : t('Hay menos dinero del esperado')}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Buttons */}
+            <div className="px-6 py-4 bg-gray-50 rounded-b-xl flex justify-end gap-3 border-t border-gray-200">
+              <button
+                className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg font-medium transition-colors"
+                onClick={() => setShowCloseCashModal(false)}
+              >
+                {t('Cancelar')}
+              </button>
+              {(profile?.role === 'admin' || profile?.role === 'super_admin') && (
+                <button
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+                  onClick={async () => {
+                    setShowCloseCashModal(false);
+                    await signOut();
+                  }}
+                >
+                  {t('Salir Sin Cambios')}
+                </button>
+              )}
+              <button
+                className="px-5 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={handleCloseCashSubmit}
+                disabled={closingLoading}
+              >
+                {closingLoading ? t('Guardando...') : t('Cerrar Caja y Salir')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showOpenCashModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-green-500 to-emerald-500 text-white px-6 py-4 rounded-t-xl">
+              <h2 className="text-xl font-bold">{t('Apertura de Caja')}</h2>
+              <p className="text-sm text-white/90 mt-1">
+                {t('Bienvenido! Ingrese el monto inicial en caja')}
+              </p>
+            </div>
+
+            {/* Content */}
+            <div className="px-6 py-6">
+              <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                <p className="text-sm text-blue-900">
+                  <strong>{t('Importante')}:</strong> {t('Este monto será el punto de partida para el control de caja del día.')}
+                </p>
+              </div>
+
+              <label className="block text-sm font-semibold text-gray-900 mb-2">
+                {t('Monto de Apertura')}
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={openingAmount}
+                onChange={(e) => setOpeningAmount(e.target.value)}
+                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg text-lg font-bold focus:border-green-500 focus:ring-2 focus:ring-green-200 transition-all"
+                placeholder="0.00"
+                autoFocus
+              />
+
+              {openingAmount && !isNaN(parseFloat(openingAmount)) && (
+                <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm font-semibold text-green-900">
+                      {t('Monto inicial en caja')}:
+                    </span>
+                    <span className="text-lg font-bold text-green-900">
+                      {formatCurrency(parseFloat(openingAmount))}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 bg-gray-50 rounded-b-xl flex justify-end gap-3 border-t border-gray-200">
+              <button
+                className="px-5 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={handleOpenCashSubmit}
+                disabled={openingLoading || !openingAmount || parseFloat(openingAmount) < 0}
+              >
+                {openingLoading ? t('Abriendo...') : t('Abrir Caja')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}

@@ -1,0 +1,297 @@
+import { useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
+import { Clock, CheckCircle, XCircle, ChefHat } from 'lucide-react';
+
+interface Order {
+  id: string;
+  stat      {filteredOrders.length === 0 ? (
+        <div className="text-center py-12">
+          <p className="text-gray-500 text-lg">No hay órdenes para mostrar</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {filteredOrders.map(order => (: 'pending' | 'preparing' | 'ready' | 'completed' | 'cancelled';
+  total: number;
+  payment_method: string;
+  created_at: string;
+  employee_profiles?: {
+    full_name: string;
+  };
+}
+
+interface OrderItem {
+  id: string;
+  quantity: number;
+  products: {
+    name: string;
+  };
+  product_sizes?: {
+    size_name: string;
+  } | null;
+}
+
+interface OrderWithItems extends Order {
+  order_items: OrderItem[];
+}
+
+export function OrdersDashboard() {
+  const [orders, setOrders] = useState<OrderWithItems[]>([]);
+  const [selectedStatus, setSelectedStatus] = useState<string>('all');
+
+  useEffect(() => {
+    fetchOrders();
+
+    const channel = supabase
+      .channel('orders-changes')
+      .on(
+        'postgres_changes',
+        { 
+          event: 'INSERT',
+          schema: 'public',
+          table: 'orders'
+        },
+        () => {
+          console.log('New order received');
+          fetchOrders();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { 
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'orders'
+        },
+        () => {
+          console.log('Order updated');
+          fetchOrders();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const fetchOrders = async () => {
+    try {
+      console.log('Iniciando búsqueda de órdenes...');
+      
+      const { data, error } = await supabase
+        .from('orders')
+        .select(`
+          *,
+          employee_profiles:employee_id(full_name),
+          order_items!order_items_order_id_fkey(
+            id,
+            quantity,
+            products:product_id(name),
+            product_sizes:size_id(size_name)
+          )
+        `)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (error) {
+        console.error('Error al obtener órdenes:', error);
+        return;
+      }
+
+      if (data) {
+        console.log('Órdenes obtenidas:', {
+          cantidad: data.length,
+          primera: data[0],
+          última: data[data.length - 1]
+        });
+        
+        // Filtrar órdenes que no tienen items
+        const validOrders = data.filter(order => 
+          order.order_items && order.order_items.length > 0
+        );
+        
+        console.log('Órdenes válidas:', validOrders.length);
+        setOrders(validOrders as OrderWithItems[]);
+      } else {
+        console.log('No se encontraron órdenes');
+      }
+    } catch (err) {
+      console.error('Error en fetchOrders:', err);
+    }
+  };
+
+  const updateOrderStatus = async (orderId: string, newStatus: Order['status']) => {
+    const { error } = await supabase
+      .from('orders')
+      .update({ status: newStatus })
+      .eq('id', orderId);
+
+    if (error) {
+      alert('Error al actualizar el estado');
+      return;
+    }
+    fetchOrders();
+  };
+
+  const filteredOrders = selectedStatus === 'all'
+    ? orders
+    : orders.filter(o => o.status === selectedStatus);
+
+  const getStatusColor = (status: string) => {
+    const colors = {
+      pending: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+      preparing: 'bg-blue-100 text-blue-800 border-blue-200',
+      ready: 'bg-green-100 text-green-800 border-green-200',
+      completed: 'bg-gray-100 text-gray-800 border-gray-200',
+      cancelled: 'bg-red-100 text-red-800 border-red-200',
+    };
+    return colors[status as keyof typeof colors] || colors.pending;
+  };
+
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case 'pending':
+        return <Clock className="w-5 h-5" />;
+      case 'preparing':
+        return <ChefHat className="w-5 h-5" />;
+      case 'ready':
+        return <CheckCircle className="w-5 h-5" />;
+      case 'cancelled':
+        return <XCircle className="w-5 h-5" />;
+      default:
+        return <Clock className="w-5 h-5" />;
+    }
+  };
+
+  const statusLabels = {
+    pending: 'Pendiente',
+    preparing: 'En Preparación',
+    ready: 'Listo',
+    completed: 'Completado',
+    cancelled: 'Cancelado',
+  };
+
+  return (
+    <div className="p-6">
+      <div className="mb-6">
+        <h2 className="text-2xl font-bold text-gray-900 mb-4">Panel de Órdenes</h2>
+        <div className="flex gap-2 flex-wrap">
+          <button
+            onClick={() => setSelectedStatus('all')}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              selectedStatus === 'all'
+                ? 'bg-amber-600 text-white'
+                : 'bg-white text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            Todas
+          </button>
+          {Object.entries(statusLabels).map(([status, label]) => (
+            <button
+              key={status}
+              onClick={() => setSelectedStatus(status)}
+              className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                selectedStatus === status
+                  ? 'bg-amber-600 text-white'
+                  : 'bg-white text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {filteredOrders.length === 0 ? (
+        <div className="bg-gray-50 rounded-lg p-8 text-center">
+          <p className="text-gray-600">No hay órdenes para mostrar</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {filteredOrders.map(order => (
+          <div
+            key={order.id}
+            className={`bg-white rounded-xl shadow-sm border-2 p-4 ${getStatusColor(order.status)}`}
+          >
+            <div className="flex justify-between items-start mb-3">
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  {getStatusIcon(order.status)}
+                  <span className="font-semibold">
+                    {statusLabels[order.status]}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-600">
+                  {new Date(order.created_at).toLocaleString('es-ES')}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-2xl font-bold text-amber-600">
+                  ${order.total.toFixed(2)}
+                </p>
+              </div>
+            </div>
+
+            <div className="mb-3 space-y-1">
+              {order.order_items.map(item => (
+                <div key={item.id} className="text-sm flex justify-between">
+                  <span>
+                    {item.quantity}x {item.products.name}
+                    {item.product_sizes && ` (${item.product_sizes.size_name})`}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <div className="border-t pt-3 space-y-2">
+              <p className="text-xs text-gray-600">
+                Empleado: {order.employee_profiles?.full_name || 'N/A'}
+              </p>
+
+              {order.status === 'pending' && (
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => updateOrderStatus(order.id, 'preparing')}
+                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded-lg text-sm font-medium transition-colors"
+                  >
+                    Preparar
+                  </button>
+                  <button
+                    onClick={() => updateOrderStatus(order.id, 'cancelled')}
+                    className="bg-red-600 hover:bg-red-700 text-white py-2 px-3 rounded-lg text-sm font-medium transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              )}
+
+              {order.status === 'preparing' && (
+                <button
+                  onClick={() => updateOrderStatus(order.id, 'ready')}
+                  className="w-full bg-green-600 hover:bg-green-700 text-white py-2 px-3 rounded-lg text-sm font-medium transition-colors"
+                >
+                  Marcar como Listo
+                </button>
+              )}
+
+              {order.status === 'ready' && (
+                <button
+                  onClick={() => updateOrderStatus(order.id, 'completed')}
+                  className="w-full bg-gray-600 hover:bg-gray-700 text-white py-2 px-3 rounded-lg text-sm font-medium transition-colors"
+                >
+                  Completar
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {filteredOrders.length === 0 && (
+        <div className="text-center py-12">
+          <p className="text-gray-500 text-lg">No hay órdenes para mostrar</p>
+        </div>
+      )}
+    </div>
+  );
+}
