@@ -805,12 +805,12 @@ export function Navigation({ currentView, onViewChange }: NavigationProps) {
               >
                 <Menu className="w-6 h-6 text-amber-600" />
               </button>
-              <div className="w-12 h-12 lg:w-16 lg:h-16 rounded-full flex items-center justify-center shadow-elegant hover:shadow-elegant-hover transition-all duration-300 hover:scale-105 group cursor-pointer overflow-hidden border-2 border-white bg-white">
-                <img src="/logo.png" alt="Logo Linventory" className="w-full h-full object-contain p-1" />
+              <div className="w-12 h-12 lg:w-16 lg:h-16 rounded-2xl flex items-center justify-center shadow-elegant hover:shadow-elegant-hover transition-all duration-300 hover:scale-105 group cursor-pointer overflow-hidden border-2 border-cyan-500/20 bg-slate-950 p-1">
+                <img src="/logo.png" alt="Vektor POS" className="w-full h-full object-cover rounded-xl" />
               </div>
               <div className="hidden sm:block">
-                <h1 className="text-xl lg:text-3xl font-black text-gradient-vibrant tracking-tight">Linventory</h1>
-                <p className="text-[10px] lg:text-sm text-gray-600 font-semibold">{t('Sistema de Gestión')}</p>
+                <h1 className="text-xl lg:text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-600 via-teal-600 to-blue-600 tracking-tight">Vektor POS</h1>
+                <p className="text-[10px] lg:text-sm text-gray-600 font-semibold">{t('TPV & Inventario')}</p>
               </div>
             </div>
 
@@ -1033,7 +1033,7 @@ export function Navigation({ currentView, onViewChange }: NavigationProps) {
             {/* Footer */}
             <div className="p-6 border-t border-gray-100 bg-gray-50/30">
               <p className="text-xs text-gray-400 text-center font-medium">
-                Linventory v1.0
+                Vektor POS v1.0
               </p>
             </div>
           </div>

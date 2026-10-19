@@ -80,14 +80,14 @@ export function LoginForm() {
 
       <div className="glass rounded-3xl shadow-2xl w-full max-w-md p-8 sm:p-10 relative z-10 animate-fadeIn border border-white/40 bg-white/95 backdrop-blur-xl">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-36 h-36 rounded-2xl mb-5 shadow-lg transform hover:scale-105 transition-all duration-300 hover:shadow-xl animate-float overflow-hidden border border-slate-800 bg-slate-950 p-3">
-            <img src="/logo.png" alt="Logo Linventory" className="w-full h-full object-contain" />
+          <div className="inline-flex items-center justify-center w-36 h-36 rounded-2xl mb-5 shadow-lg transform hover:scale-105 transition-all duration-300 hover:shadow-xl animate-float overflow-hidden border border-cyan-500/30 bg-slate-950 p-2">
+            <img src="/logo.png" alt="Vektor POS" className="w-full h-full object-cover rounded-xl" />
           </div>
-          <h1 className="text-4xl font-black text-gradient-vibrant mb-2 tracking-tight">
-            Linventory
+          <h1 className="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-600 via-teal-600 to-blue-600 mb-2 tracking-tight">
+            Vektor POS
           </h1>
-          <p className="text-gray-600 font-semibold text-base sm:text-lg">{t('Sistema de Gestión')}</p>
-          <div className="mt-3 h-1 w-20 mx-auto gradient-primary rounded-full"></div>
+          <p className="text-gray-600 font-semibold text-sm tracking-wide uppercase">{t('Terminal Punto de Venta & Inventario')}</p>
+          <div className="mt-3 h-1 w-20 mx-auto bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full"></div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
@@ -106,7 +106,7 @@ export function LoginForm() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-5 py-3.5 border-2 border-gray-200 rounded-2xl focus:border-amber-500 focus:ring-4 focus:ring-amber-100 transition-all duration-200 outline-none bg-white shadow-sm hover:shadow-md hover:border-gray-300 text-gray-900"
+              className="w-full px-5 py-3.5 border-2 border-gray-200 rounded-2xl focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100 transition-all duration-200 outline-none bg-white shadow-sm hover:shadow-md hover:border-gray-300 text-gray-900"
               placeholder={t('empleado@empresa.com')}
               required
               autoComplete="email"
@@ -160,6 +160,27 @@ export function LoginForm() {
               )}
             </span>
             <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300"></div>
+          </button>
+
+          <div className="relative flex py-1 items-center">
+            <div className="flex-grow border-t border-gray-300"></div>
+            <span className="flex-shrink mx-3 text-gray-400 text-xs uppercase font-bold tracking-wider">o acceso rápido</span>
+            <div className="flex-grow border-t border-gray-300"></div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setEmail('mouad@POS.com');
+              setPassword('qyzDgGcA54Fg');
+              setTimeout(() => {
+                const formEl = document.querySelector('form');
+                if (formEl) formEl.requestSubmit();
+              }, 50);
+            }}
+            className="w-full bg-slate-950 hover:bg-slate-900 text-cyan-400 border border-cyan-500/40 font-bold py-3.5 px-4 rounded-2xl shadow-md transition-all duration-200 flex items-center justify-center gap-2 hover:scale-[1.01]"
+          >
+            <span>🚀 Probar Demo Interactiva (1 Clic)</span>
           </button>
         </form>
 
