@@ -131,7 +131,7 @@ async function uploadToS3ViaEdgeFunction(
 ): Promise<{ success: boolean; s3_url?: string; error?: string }> {
   try {
     // Usar API local o endpoint configurado
-    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+    const apiUrl = import.meta.env.VITE_API_URL || '';
     const endpoint = `${apiUrl}/api/backup-to-s3`;
 
     console.log('☁️ Subiendo a S3 via API...', { fileName, endpoint });
